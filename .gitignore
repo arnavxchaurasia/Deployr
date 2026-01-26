@@ -1,0 +1,31 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Env
+.env
+.env.*
+
+# Prisma
+prisma/dev.db
+prisma/migrations/**/migration.sql
+
+# Kafka certs (sensitive)
+api-server/kafka-certs/
+server/kafka-certs/
+s3-reverse-proxy/kafka-certs/
+**/*.pem
+**/*.key
+**/*.cert
+
+# Build output
+output/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
