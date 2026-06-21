@@ -10,9 +10,9 @@ const kafka = new Kafka({
   brokers: ["kafka-26f06e40-notesxmait-c472.j.aivencloud.com:20310"],
   ssl: {
     rejectUnauthorized: true,
-    ca: [fs.readFileSync(path.join(__dirname, "../../kafka-certs/ca.pem"))],
-    cert: fs.readFileSync(path.join(__dirname, "../../kafka-certs/service.cert")),
-    key: fs.readFileSync(path.join(__dirname, "../../kafka-certs/service.key")),
+    ca: [process.env.KAFKA_CA_CERT ? process.env.KAFKA_CA_CERT.replace(/\\n/g, '\n') : fs.readFileSync(path.join(__dirname, "../../kafka-certs/ca.pem"))],
+    cert: process.env.KAFKA_SERVICE_CERT ? process.env.KAFKA_SERVICE_CERT.replace(/\\n/g, '\n') : fs.readFileSync(path.join(__dirname, "../../kafka-certs/service.cert")),
+    key: process.env.KAFKA_SERVICE_KEY ? process.env.KAFKA_SERVICE_KEY.replace(/\\n/g, '\n') : fs.readFileSync(path.join(__dirname, "../../kafka-certs/service.key")),
     servername: "kafka-26f06e40-notesxmait-c472.j.aivencloud.com",
   },
   connectionTimeout: 15000,
