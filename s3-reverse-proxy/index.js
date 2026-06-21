@@ -14,6 +14,9 @@ const S3_BASE =
 const API_BASE = "http://localhost:9000";
 const SOCKET_BASE = "http://localhost:9002";
 
+const resolveCache = new Map();
+const RESOLVE_TTL = 30 * 1000;
+
 /* ------------------------------------------------
    Helper: Parse Cookie Header manually
 ------------------------------------------------ */
@@ -100,13 +103,23 @@ app.use(async (req, res) => {
     }
 
     // Resolve project + deployment via subdomain and deployment (using query params)
-    let resolveUrl = `${API_BASE}/resolve/${subdomain}`;
-    if (deployment) {
-      resolveUrl += `?deployment=${deployment}`;
-    }
-    const resolveRes = await axios.get(resolveUrl);
+    const cacheKey = `${subdomain}:${deployment || 'latest'}`;
+    const cached = resolveCache.get(cacheKey);
+    let projectId, deploymentId;
 
-    const { projectId, deploymentId } = resolveRes.data;
+    if (cached && Date.now() - cached.ts < RESOLVE_TTL) {
+      projectId = cached.data.projectId;
+      deploymentId = cached.data.deploymentId;
+    } else {
+      let resolveUrl = `${API_BASE}/resolve/${subdomain}`;
+      if (deployment) {
+        resolveUrl += `?deployment=${deployment}`;
+      }
+      const resolveRes = await axios.get(resolveUrl);
+      projectId = resolveRes.data.projectId;
+      deploymentId = resolveRes.data.deploymentId;
+      resolveCache.set(cacheKey, { ts: Date.now(), data: { projectId, deploymentId } });
+    }
     const target = `${S3_BASE}/${projectId}/${deploymentId}`;
 
     const startTime = Date.now();

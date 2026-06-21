@@ -23,7 +23,6 @@ const consumer = kafka.consumer({
   groupId: "api-server-logs-consumer",
 });
 
-const writtenSignals = new Set();
 
 async function initKafkaConsumer(io) {
   await consumer.connect();
@@ -99,16 +98,19 @@ async function initKafkaConsumer(io) {
           select: { projectId: true, status: true, startedAt: true, trigger: true, branch: true },
         });
 
-        if (!deployment || deployment.status === "READY" || writtenSignals.has(DEPLOYEMENT_ID)) return;
+        if (!deployment || deployment.status === "READY" || deployment.status === "FAILED") return;
 
         const finishedAt = new Date();
         const buildTimeMs = deployment.startedAt ? finishedAt.getTime() - deployment.startedAt.getTime() : null;
 
+        const updated = await prisma.deployment.updateMany({
+          where: { id: DEPLOYEMENT_ID, status: { notIn: ["READY", "FAILED"] } },
+          data: { status: "READY", isActive: true, finishedAt },
+        });
+
+        if (updated.count === 0) return; // Handled by another consumer instance
+
         await prisma.$transaction([
-          prisma.deployment.update({
-            where: { id: DEPLOYEMENT_ID },
-            data: { status: "READY", isActive: true, finishedAt },
-          }),
           prisma.deploymentSignal.create({
             data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs },
           }),
@@ -121,9 +123,6 @@ async function initKafkaConsumer(io) {
             data: { latestDeploymentId: DEPLOYEMENT_ID, deployedAt: finishedAt, lastDeployedAt: finishedAt },
           }),
         ]);
-
-        writtenSignals.add(DEPLOYEMENT_ID);
-        setTimeout(() => writtenSignals.delete(DEPLOYEMENT_ID), 10 * 60 * 1000);
 
         try { invalidateAnalytics(null, deployment.projectId); } catch {}
         console.log("Deployment promoted:", DEPLOYEMENT_ID);
@@ -147,7 +146,7 @@ async function initKafkaConsumer(io) {
           select: { projectId: true, status: true, startedAt: true, trigger: true, branch: true },
         });
 
-        if (!deployment || deployment.status === "READY" || writtenSignals.has(DEPLOYEMENT_ID)) return;
+        if (!deployment || deployment.status === "READY" || deployment.status === "FAILED") return;
 
         const finishedAt = new Date();
         const buildTimeMs = deployment.startedAt ? finishedAt.getTime() - deployment.startedAt.getTime() : null;
@@ -162,8 +161,7 @@ async function initKafkaConsumer(io) {
             data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs },
           });
 
-          writtenSignals.add(DEPLOYEMENT_ID);
-          setTimeout(() => writtenSignals.delete(DEPLOYEMENT_ID), 10 * 60 * 1000);
+
 
           try { invalidateAnalytics(null, deployment.projectId); } catch {}
           console.log("Deployment FAILED:", DEPLOYEMENT_ID);

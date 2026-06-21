@@ -6,7 +6,7 @@ const { rateLimit } = require('../middlewares/rateLimitMiddleware');
 const { encrypt, decrypt } = require('../../lib/crypto');
 const crypto = require('crypto');
 const dns = require('dns/promises');
-const { S3Client, ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, ListObjectsV2Command, DeleteObjectsCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
 const bcrypt = require('bcryptjs');
 const { ecsClient, CLUSTER, TASK, RunTaskCommand } = require('../services/awsService');
 const mailService = require('../services/mailService');
@@ -395,7 +395,22 @@ if (!rateLimit(`verify-${ip}`, 5, 60_000)) {
 });
 
 router.post("/auth/change-password", authMiddleware, async (req, res) => {
-  const { currentPassword, newPassword } = req.body;
+  const schema = z.object({
+    currentPassword: z.string(),
+    newPassword: z
+      .string()
+      .min(8, "Must be at least 8 characters")
+      .regex(/[A-Z]/, "Must contain an uppercase letter")
+      .regex(/[0-9]/, "Must contain a number")
+      .regex(/[^A-Za-z0-9]/, "Must contain a symbol"),
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Weak or invalid password" });
+  }
+
+  const { currentPassword, newPassword } = parsed.data;
 
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
@@ -463,9 +478,31 @@ router.post("/user/avatar", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Image data is required" });
     }
 
+    let imageUrl = image;
+    
+    // If it's a base64 string, upload to S3
+    if (image.startsWith("data:image")) {
+      const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(base64Data, "base64");
+      const mimeType = image.substring(image.indexOf(":") + 1, image.indexOf(";")) || "image/png";
+      const ext = mimeType.split('/')[1] || "png";
+
+      const s3Client = new S3Client({ region: "us-east-1" });
+      const key = `avatars/${req.user.id}-${Date.now()}.${ext}`;
+
+      await s3Client.send(new PutObjectCommand({
+        Bucket: "vercel-clone-ws",
+        Key: key,
+        Body: buffer,
+        ContentType: mimeType,
+      }));
+
+      imageUrl = `https://vercel-clone-ws.s3.us-east-1.amazonaws.com/${key}`;
+    }
+
     const updated = await prisma.user.update({
       where: { id: req.user.id },
-      data: { image },
+      data: { image: imageUrl },
     });
 
     res.json({ success: true, image: updated.image });

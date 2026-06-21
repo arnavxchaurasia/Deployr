@@ -116,9 +116,15 @@ async function init() {
     }
     fs.writeFileSync(path.join(outDirPath, ".env"), envContent);
 
+    const safeEnv = { ...process.env, ...USER_ENV_VARS };
+    delete safeEnv.AWS_ACCESS_KEY_ID;
+    delete safeEnv.AWS_SECRET_ACCESS_KEY;
+    delete safeEnv.AWS_SESSION_TOKEN;
+    delete safeEnv.AWS_LAMBDA_ROLE_ARN;
+
     const command = `cd ${outDirPath} && npm install && npm run build`;
     const buildStartTime = Date.now();
-    const p = exec(command, { timeout: 15 * 60 * 1000 });
+    const p = exec(command, { timeout: 15 * 60 * 1000, env: safeEnv });
 
     p.stdout.on("data", async (data) => await publishLog(data.toString()));
     p.stderr.on("data", async (data) => await publishLog(`error: ${data.toString()}`));

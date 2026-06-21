@@ -50,7 +50,7 @@ router.post("/payment/verify", authMiddleware, async (req, res) => {
     shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
     const digest = shasum.digest('hex');
 
-    if (digest !== razorpay_signature) {
+    if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(razorpay_signature))) {
       return res.status(400).json({ error: "Transaction not legit!" });
     }
 

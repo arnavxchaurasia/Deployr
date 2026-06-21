@@ -37,6 +37,8 @@ export default {
   }
 }
 
+let telemetryQueue = [];
+
 async function trackTelemetry(request, env, host, status, cached, latencyMs) {
   try {
     const cache = caches.default;
@@ -52,7 +54,7 @@ async function trackTelemetry(request, env, host, status, cached, latencyMs) {
     const { projectId } = await resolveRes.json();
     const url = new URL(request.url);
     
-    const payload = {
+    telemetryQueue.push({
       projectId,
       path: url.pathname,
       status,
@@ -60,13 +62,17 @@ async function trackTelemetry(request, env, host, status, cached, latencyMs) {
       cached,
       country: request.cf?.country || null,
       city: request.cf?.city || null
-    };
-
-    await fetch(`${env.API_BASE}/track`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
     });
+
+    if (telemetryQueue.length >= 10) {
+      const batch = [...telemetryQueue];
+      telemetryQueue = [];
+      await fetch(`${env.API_BASE}/track`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(batch)
+      });
+    }
   } catch (e) {
     // Fail silently, telemetry should not break the app
   }

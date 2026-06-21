@@ -15,25 +15,27 @@ const router = express.Router();
 
 router.post("/track", async (req, res) => {
   try {
-    const { projectId, path, status, latencyMs, cached, country, city } = req.body;
+    const payload = req.body;
+    const events = Array.isArray(payload) ? payload : [payload];
     
-    if (!projectId) {
-      return res.status(400).json({ error: "Missing projectId" });
+    const validEvents = events.filter(e => e && e.projectId);
+    if (validEvents.length === 0) {
+      return res.status(400).json({ error: "Missing valid projectId in payload" });
     }
 
-    await prisma.requestLog.create({
-      data: {
-        projectId,
-        path: path || "/",
-        status: status || 200,
-        latencyMs: latencyMs || 0,
-        cached: Boolean(cached),
-        country,
-        city,
-      }
+    await prisma.requestLog.createMany({
+      data: validEvents.map(e => ({
+        projectId: e.projectId,
+        path: e.path || "/",
+        status: e.status || 200,
+        latencyMs: e.latencyMs || 0,
+        cached: Boolean(e.cached),
+        country: e.country,
+        city: e.city,
+      }))
     });
 
-    res.json({ success: true });
+    res.json({ success: true, count: validEvents.length });
   } catch (err) {
     console.error("Telemetry error:", err);
     res.status(500).json({ error: "Failed to save telemetry" });
