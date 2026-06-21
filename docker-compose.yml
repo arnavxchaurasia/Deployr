@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:ci-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CADDY_INGRESS_NETWORKS=caddy
+    networks:
+      - caddy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - caddy_data:/data
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: deployr-frontend
+    networks:
+      - caddy
+    environment:
+      - NEXT_PUBLIC_API_URL=https://api.deployr.dev  # Replace with actual API domain
+    labels:
+      caddy: deployr.dev # Replace with actual domain
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+    restart: unless-stopped
+
+  api-server:
+    build: ./api-server
+    container_name: deployr-api
+    networks:
+      - caddy
+    env_file:
+      - ./api-server/.env
+    labels:
+      caddy: api.deployr.dev # Replace with actual API domain
+      caddy.handle_path_0: /socket.io/*
+      caddy.handle_path_0.reverse_proxy: "{{upstreams 9002}}"
+      caddy.handle_path_1: /*
+      caddy.handle_path_1.reverse_proxy: "{{upstreams 9000}}"
+    restart: unless-stopped
+
+  s3-proxy:
+    build: ./s3-reverse-proxy
+    container_name: deployr-proxy
+    networks:
+      - caddy
+    labels:
+      caddy: "*.deployr.dev" # Replace with actual wildcard domain
+      caddy.reverse_proxy: "{{upstreams 8000}}"
+    restart: unless-stopped
+
+networks:
+  caddy:
+    external: true
+
+volumes:
+  caddy_data:

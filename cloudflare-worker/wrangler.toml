@@ -1,0 +1,6 @@
+name = "deployr-proxy"
+main = "src/index.js"
+compatibility_date = "2023-10-30"
+
+[vars]
+API_BASE = "https://api.deployr.xyz"

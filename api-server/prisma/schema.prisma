@@ -1,47 +1,250 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
 
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-
 }
 
-enum DeploymentStatus{
- NOT_STARTED
-  IN_PROGRESS
+enum DeploymentStatus {
   QUEUED
+  BUILDING
   READY
-  FAIL
+  FAILED
 }
 
-model Project{
-   id String @id @default(uuid())
-   name String
-   gitURL String @map("git_url")
-   subDomain String @map("subdomain") 
-   customDomain String? @map("custom_domain")
-   Deployment Deployment[]
-
-   createdAt  DateTime @default(now()) 
-    updatedAt  DateTime @updatedAt
+enum RepoProvider {
+  GITHUB
+  GITLAB
+  BITBUCKET
+  OTHER
 }
 
-model Deployment{
+enum DeployTrigger {
+  MANUAL
+  WEBHOOK
+  ROLLBACK
+  REDEPLOY
+}
+
+enum Plan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+model User {
+  id       String  @id @default(uuid())
+  email    String  @unique
+  name     String?
+  image    String?
+  password String?
+
+  emailVerified     Boolean   @default(false)
+  verifyToken       String?
+  verifyTokenExpiry DateTime?
+
+  resetToken       String?
+  resetTokenExpiry DateTime?
+
+  plan              Plan    @default(FREE)
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+
+  githubUsername String?
+  role           String?
+  bio            String?
+  company        String?
+
+  projects Project[]
+  loginSessions LoginSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model RecommendationOutcome {
+  id                String   @id @default(uuid())
+  recommendationId  String
+  applied           Boolean
+  improvementMetric String?
+  improvementValue  Float?
+  createdAt         DateTime @default(now())
+}
+
+model DeploymentSignal {
+  id           String @id @default(uuid())
+  deploymentId String
+
+  nodeVersion     String?
+  packageManager  String?
+  dependencyCount Int?
+  buildTimeMs     Int?
+  installTimeMs   Int?
+  bundleTimeMs    Int?
+  warningsCount   Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([deploymentId])
+}
+
+model EngineeringRule {
+  id          String @id @default(uuid())
+  code        String @unique
+  title       String
+  description String
+
+  condition Json
+  severity  String // low | medium | high
+  impact    String // performance | stability | cost | scale
+
+  recommendation String
+  createdAt      DateTime @default(now())
+}
+
+model DeploymentRecommendation {
+  id           String @id @default(uuid())
+  deploymentId String
+  ruleCode     String
+
+  title          String
+  explanation    String
+  recommendation String
+
+  severity   String
+  impact     String
+  confidence Float // 0 → 1
+
+  applied   Boolean?
+  createdAt DateTime @default(now())
+}
+
+model Project {
   id String @id @default(uuid())
-  project Project @relation(fields: [projectId], references: [id])
-  projectId String @map("project_id")
-  status DeploymentStatus @default(NOT_STARTED)
 
+  name   String
+  gitURL String @map("git_url")
+
+  slug      String @unique
+  subDomain String @unique @map("subdomain")
+
+  customDomain            String? @unique @map("custom_domain")
+  domainVerified          Boolean @default(false)
+  domainVerificationToken String? @unique
+
+  repoProvider RepoProvider @default(GITHUB)
+  framework    String?
+
+  isActive Boolean @default(true)
+
+  isPublished Boolean @default(true)
+
+  deployedAt     DateTime?
+  lastDeployedAt DateTime?
+
+  latestDeploymentId String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  deployments         Deployment[]
+  environmentVariables EnvironmentVariable[]
+  requestLogs         RequestLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([slug])
+}
+
+model EnvironmentVariable {
+  id        String   @id @default(uuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   
-   createdAt  DateTime @default(now()) 
-    updatedAt  DateTime @updatedAt
+  key       String
+  value     String   // Encrypted value
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, key])
+}
+
+model Deployment {
+  id String @id @default(uuid())
+
+  projectId String  @map("project_id")
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  status DeploymentStatus @default(QUEUED)
+
+  isActive Boolean @default(false)
+
+  taskArn     String?
+  functionUrl String?
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  commitHash String?
+  branch     String?
+
+  trigger DeployTrigger @default(MANUAL)
+
+  logsUrl String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs LogEvent[]
+
+  @@index([projectId])
+}
+
+model LogEvent {
+  id String @id @default(uuid())
+
+  deploymentId String
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+
+  log String
+
+  timestamp DateTime @default(now())
+
+  @@index([deploymentId, timestamp])
+}
+
+model RequestLog {
+  id        String   @id @default(uuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  timestamp DateTime @default(now())
+  path      String
+  status    Int
+  latencyMs Int
+  cached    Boolean
+  country   String?
+  city      String?
+
+  @@index([projectId, timestamp])
+}
+
+model LoginSession {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  ip        String?
+  userAgent String?
+  device    String?
+  os        String?
+  browser   String?
+  
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
