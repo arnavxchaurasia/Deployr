@@ -14,4 +14,6 @@ ENV PORT=9000
 EXPOSE 9000
 EXPOSE 9002
 
+USER node
+
 CMD ["npm", "start"]

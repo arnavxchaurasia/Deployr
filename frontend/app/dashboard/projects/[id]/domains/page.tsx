@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Globe, CheckCircle, Loader2, AlertTriangle } from "lucide-react";
+import { Globe, CheckCircle, Loader2, AlertTriangle, Shield, ExternalLink } from "lucide-react";
 
 type Status = "idle" | "added" | "verified" | "error";
 
@@ -135,15 +135,42 @@ export default function DomainsPage() {
           </div>
 
           {status === "verified" && (
-            <div className="mt-4 pt-4 border-t border-dashed">
-              <h3 className="text-sm font-medium text-green-600 mb-2">🎉 Success! Next steps:</h3>
-              <p className="text-sm text-zinc-600 dark:text-zinc-400 mb-3">
-                Your domain is verified. To route traffic to your project, add the following CNAME record to your DNS provider:
-              </p>
-              <div className="bg-black text-green-400 rounded-lg p-4 text-sm overflow-x-auto">
-                <pre className="whitespace-pre-wrap">
-{`CNAME   ${domain}   edge.deployr.com`}
-                </pre>
+            <div className="mt-4 pt-4 border-t border-dashed space-y-4">
+              <h3 className="text-sm font-medium text-green-600">Domain verified — two more steps to go live:</h3>
+
+              {/* Step A: CNAME */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Step 1 — Route traffic</p>
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  Add a CNAME record in your DNS provider pointing your domain to our edge:
+                </p>
+                <div className="bg-black text-green-400 rounded-lg p-4 text-sm overflow-x-auto">
+                  <pre className="whitespace-pre-wrap">{`CNAME   ${domain}   edge.deployr.com`}</pre>
+                </div>
+              </div>
+
+              {/* Step B: SSL via Cloudflare */}
+              <div className="space-y-2 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                <div className="flex items-center gap-2 text-blue-400 text-sm font-semibold">
+                  <Shield size={14} />
+                  Step 2 — Enable HTTPS (free via Cloudflare)
+                </div>
+                <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                  To get HTTPS on your custom domain, proxy it through Cloudflare (free plan):
+                </p>
+                <ol className="text-sm text-zinc-600 dark:text-zinc-400 space-y-1.5 list-decimal list-inside">
+                  <li>Add your domain to Cloudflare and update your registrar nameservers</li>
+                  <li>In Cloudflare DNS, add the CNAME above with the proxy enabled (orange cloud)</li>
+                  <li>Under SSL/TLS, set mode to <strong className="text-zinc-300">Full</strong></li>
+                </ol>
+                <a
+                  href="https://developers.cloudflare.com/fundamentals/get-started/setup/add-site/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-1 transition-colors"
+                >
+                  Cloudflare setup guide <ExternalLink size={11} />
+                </a>
               </div>
             </div>
           )}

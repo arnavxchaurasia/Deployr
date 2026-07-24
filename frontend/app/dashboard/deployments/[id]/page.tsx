@@ -11,6 +11,9 @@ import {
   AlertTriangle,
   Rocket,
   Trash2,
+  Zap,
+  ExternalLink,
+  Copy,
 } from "lucide-react";
 
 type LogRow = {
@@ -142,6 +145,19 @@ export default function DeploymentLogsPage() {
     }
   }
 
+  const functions = logs
+    .filter(l => l.startsWith("FUNCTION_URL:"))
+    .map(l => {
+      const parts = l.replace("FUNCTION_URL:", "").split(":");
+      const name = parts[0];
+      const url = parts.slice(1).join(":");
+      return { name, url };
+    });
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text);
+  }
+
   if (loading) {
     return <div className="p-10 text-zinc-500">Loading logs…</div>;
   }
@@ -176,6 +192,48 @@ export default function DeploymentLogsPage() {
         )}
       </div>
 
+      {/* Deployr Functions panel */}
+      {functions.length > 0 && (
+        <div className="rounded-2xl border border-violet-500/20 bg-violet-500/5 p-5 space-y-3">
+          <div className="flex items-center gap-2 text-violet-400 font-semibold text-sm">
+            <Zap size={15} />
+            Deployr Functions ({functions.length})
+          </div>
+          <div className="space-y-2">
+            {functions.map(fn => (
+              <div key={fn.name} className="flex items-center justify-between gap-4 rounded-xl bg-black/30 border border-zinc-800 px-4 py-2.5">
+                <div>
+                  <span className="text-xs font-mono font-semibold text-zinc-200">{fn.name}</span>
+                  <p className="text-[11px] text-zinc-500 font-mono mt-0.5 truncate max-w-sm">{fn.url}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => copyToClipboard(fn.url)}
+                    className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
+                    title="Copy URL"
+                  >
+                    <Copy size={13} />
+                  </button>
+                  <a
+                    href={fn.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
+                    title="Open function"
+                  >
+                    <ExternalLink size={13} />
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-zinc-500">
+            Functions export a <code className="text-zinc-400 bg-zinc-800 px-1 rounded">handler</code> function from{" "}
+            <code className="text-zinc-400 bg-zinc-800 px-1 rounded">functions/*.js</code> in your repository.
+          </p>
+        </div>
+      )}
+
       {/* Logs */}
       <div
         className="relative bg-black rounded-2xl border border-zinc-800 overflow-hidden"
@@ -194,7 +252,7 @@ export default function DeploymentLogsPage() {
           )}
 
           {logs.map((log, i) => (
-            <div key={i} className="whitespace-pre-wrap">
+            <div key={i} className={`whitespace-pre-wrap ${log.startsWith("FUNCTION_URL:") ? "text-violet-400" : log.startsWith("error:") || log.includes("FATAL") ? "text-red-400" : log.includes("Build Complete") || log.includes("Done") ? "text-emerald-400" : ""}`}>
               {log}
             </div>
           ))}

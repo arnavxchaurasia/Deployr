@@ -1,48 +1,100 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
-import { Globe2, Construction } from "lucide-react";
+import { api } from "@/lib/api";
+import { Card } from "@/components/ui/card";
+import { Globe2, CheckCircle2, AlertTriangle, ExternalLink, ArrowRight } from "lucide-react";
+
+type DomainEntry = {
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  domain: string;
+  verified: boolean;
+  verificationToken: string | null;
+};
 
 export default function DomainsPage() {
+  const [domains, setDomains] = useState<DomainEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetch = useCallback(async () => {
+    try {
+      const res = await api.get("/domains");
+      setDomains(res.data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetch(); }, [fetch]);
+
   return (
-    <div className="w-full max-w-7xl mx-auto pb-20 animate-fadeIn">
-      {/* Console Top Navigation */}
-      <div className="flex items-center gap-6 border-b border-zinc-200 dark:border-white/10 pb-4 mb-8 overflow-x-auto scrollbar-none">
-        <Link href="/dashboard" className="text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white pb-4 -mb-[17px] transition-colors whitespace-nowrap">
-          Overview
-        </Link>
-        <Link href="/dashboard/integrations" className="text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white pb-4 -mb-[17px] transition-colors whitespace-nowrap">
-          Integrations
-        </Link>
-        <Link href="/dashboard/activity" className="text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white pb-4 -mb-[17px] transition-colors whitespace-nowrap">
-          Activity
-        </Link>
-        <Link href="/dashboard/domains" className="text-sm font-semibold text-zinc-900 dark:text-white border-b-2 border-indigo-500 pb-4 -mb-[17px] whitespace-nowrap">
-          Domains
-        </Link>
-        <Link href="/dashboard/usage" className="text-sm font-medium text-zinc-500 hover:text-zinc-900 dark:hover:text-white pb-4 -mb-[17px] transition-colors whitespace-nowrap">
-          Usage
-        </Link>
+    <div className="max-w-4xl mx-auto space-y-6 pb-20 animate-fadeIn">
+      <div>
+        <h1 className="text-3xl font-extrabold tracking-tight">Custom Domains</h1>
+        <p className="text-zinc-500 mt-1 text-sm">
+          All custom domains across your projects. Manage DNS verification per project.
+        </p>
       </div>
 
-      <div className="flex flex-col items-center justify-center p-20 mt-10 text-center border border-dashed border-zinc-300 dark:border-white/10 rounded-3xl bg-zinc-50/50 dark:bg-zinc-900/20 backdrop-blur-md">
-        <div className="w-20 h-20 rounded-2xl bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-white/10 flex items-center justify-center mb-6 shadow-xl relative">
-          <Globe2 size={32} className="text-indigo-500" />
-          <div className="absolute -bottom-2 -right-2 w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-500/20 flex items-center justify-center border border-white dark:border-zinc-900">
-            <Construction size={14} className="text-amber-600 dark:text-amber-400" />
-          </div>
+      {loading ? (
+        <div className="space-y-3">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="h-20 rounded-2xl bg-zinc-100 dark:bg-zinc-800 animate-pulse" />
+          ))}
         </div>
-        <h2 className="text-2xl font-extrabold text-zinc-900 dark:text-white mb-3">
-          Custom Domains
-        </h2>
-        <p className="text-sm text-zinc-500 max-w-md mb-8">
-          Manage your custom domain names, SSL certificates, and DNS settings for all your hosted projects. Coming soon.
-        </p>
-        <Link href="/dashboard">
-          <Button className="bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-100 rounded-xl px-8 font-bold shadow-xl transition-all">
-            Back to Dashboard
-          </Button>
-        </Link>
-      </div>
+      ) : domains.length === 0 ? (
+        <Card className="p-16 text-center border-dashed rounded-2xl">
+          <Globe2 size={40} className="text-zinc-300 dark:text-zinc-700 mx-auto mb-4" />
+          <p className="font-semibold text-zinc-700 dark:text-zinc-300">No custom domains yet</p>
+          <p className="text-sm text-zinc-500 mt-1">
+            Open a project and go to <strong>Domains</strong> to add one.
+          </p>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {domains.map(entry => (
+            <Link
+              key={entry.domain}
+              href={`/dashboard/projects/${entry.projectId}/domains`}
+              className="flex items-center gap-4 px-5 py-4 rounded-2xl bg-white/60 dark:bg-zinc-900/60 border border-zinc-200/60 dark:border-white/10 hover:border-indigo-500/40 transition-all group"
+            >
+              {entry.verified
+                ? <CheckCircle2 size={18} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={18} className="text-amber-500 shrink-0" />}
+
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-sm text-zinc-900 dark:text-zinc-100 font-mono">
+                    {entry.domain}
+                  </span>
+                  <a
+                    href={`https://${entry.domain}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={e => e.stopPropagation()}
+                    className="text-zinc-400 hover:text-indigo-500 transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                  </a>
+                </div>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  {entry.projectName} ·{" "}
+                  {entry.verified
+                    ? <span className="text-emerald-500">Verified</span>
+                    : <span className="text-amber-500">Pending DNS verification</span>}
+                </p>
+              </div>
+
+              <ArrowRight size={16} className="text-zinc-300 group-hover:text-indigo-400 transition-colors shrink-0" />
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,9 +1,8 @@
 const { prisma } = require("../../lib/prisma");
 
-// The Engine: Advanced Heuristic Rule Evaluation
 async function processTelemetry(projectId, deploymentId, telemetry) {
   try {
-    console.log(`[AI Engine] Analyzing telemetry for deployment ${deploymentId}...`);
+    console.log(`[Build Checks] Analyzing telemetry for deployment ${deploymentId}...`);
     
     const { dependencies, devDependencies, totalBuildTimeMs, isNextJs } = telemetry;
     const allDeps = { ...dependencies, ...devDependencies };

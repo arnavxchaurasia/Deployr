@@ -8,8 +8,31 @@ const crypto = require('crypto');
 const dns = require('dns/promises');
 const { S3Client, ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
 const bcrypt = require('bcryptjs');
-const { ecsClient, CLUSTER, TASK, RunTaskCommand } = require('../services/awsService');
-const { getProjectAnalytics } = require('../services/analyticsService');
+const { ecsClient, CLUSTER, TASK, SUBNETS, SECURITY_GROUP, LAMBDA_EXECUTION_ROLE_ARN, RunTaskCommand } = require('../services/awsService');
+const { getProjectAnalytics, getTrafficAnalytics } = require('../services/analyticsService');
+const { logEvent } = require('../services/auditService');
+
+const APP_URL = process.env.APP_URL || 'http://localhost:8000';
+const S3_BUCKET = process.env.S3_BUCKET || 'vercel-clone-ws';
+
+async function deleteS3Prefix(prefix) {
+  const s3 = new S3Client({ region: "us-east-1" });
+  let continuationToken;
+  do {
+    const listed = await s3.send(new ListObjectsV2Command({
+      Bucket: S3_BUCKET,
+      Prefix: prefix,
+      ContinuationToken: continuationToken,
+    }));
+    if (listed.Contents?.length) {
+      await s3.send(new DeleteObjectsCommand({
+        Bucket: S3_BUCKET,
+        Delete: { Objects: listed.Contents.map(obj => ({ Key: obj.Key })) },
+      }));
+    }
+    continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+  } while (continuationToken);
+}
 
 const router = express.Router();
 
@@ -56,6 +79,7 @@ router.post("/project", authMiddleware, async (req, res) => {
       },
     });
 
+    logEvent(req.user.id, 'project.created', { projectId: project.id, projectName: project.name });
     res.json({ status: "success", data: project });
   } catch (err) {
     console.error("Create project error:", err);
@@ -94,7 +118,7 @@ router.get("/project/:id", authMiddleware, async (req, res) => {
       project.isPublished && activeDeployment
         ? project.customDomain && project.domainVerified
           ? `https://${project.customDomain}`
-          : `http://localhost:8000/?project=${project.subDomain}`
+          : `${APP_URL}/?project=${project.subDomain}`
         : null;
 
     let status = "NOT_DEPLOYED";
@@ -128,6 +152,14 @@ router.get("/project/:id", authMiddleware, async (req, res) => {
         customDomain: project.customDomain,
         domainVerified: project.domainVerified,
         isPublished: project.isPublished,
+
+        buildCommand:    project.buildCommand   ?? null,
+        outputDir:       project.outputDir      ?? null,
+        installCommand:  project.installCommand ?? null,
+        rootDir:         project.rootDir        ?? null,
+
+        notifyWebhookUrl: project.notifyWebhookUrl ?? null,
+        hasDeployHook:    !!project.deployHookToken,
       },
     });
   } catch (err) {
@@ -202,8 +234,16 @@ router.get("/project/:id/deployments", authMiddleware, async (req, res) => {
       }
     }
 
+    const BASE_DOMAIN = process.env.BASE_DOMAIN;
     const formatted = project.deployments.map(d => {
-      const previewUrl = `http://localhost:8000/?project=${project.subDomain}&deployment=${d.id}`;
+      let previewUrl = null;
+      if (d.status === "READY") {
+        if (d.isPreview && d.previewSubdomain && BASE_DOMAIN) {
+          previewUrl = `https://${d.previewSubdomain}.${BASE_DOMAIN}`;
+        } else {
+          previewUrl = `${APP_URL}/?project=${project.subDomain}&deployment=${d.id}`;
+        }
+      }
 
       return {
         id: d.id,
@@ -215,7 +255,9 @@ router.get("/project/:id/deployments", authMiddleware, async (req, res) => {
         buildTimeMs: buildTimeMap.get(d.id) ?? null,
 
         isProduction: d.isActive === true,
-        previewUrl: d.status === "READY" ? previewUrl : null,
+        isPreview: d.isPreview === true,
+        previewSubdomain: d.previewSubdomain ?? null,
+        previewUrl,
 
         canPromote: d.status === "READY" && !d.isActive,
         canDelete: true,
@@ -349,7 +391,7 @@ router.get("/projects", authMiddleware, async (req, res) => {
       const liveUrl = active
         ? p.customDomain && p.domainVerified
           ? `https://${p.customDomain}`
-          : `http://localhost:8000/?project=${p.slug}`
+          : `${APP_URL}/?project=${p.slug}`
         : null;
 
       return {
@@ -388,28 +430,8 @@ router.delete("/project/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Not found" });
     }
 
-    const s3 = new S3Client({ region: "us-east-1" });
-
     for (const deployment of project.deployments) {
-      const prefix = `__outputs/${project.id}/${deployment.id}/`;
-
-      const listed = await s3.send(
-        new ListObjectsV2Command({
-          Bucket: "vercel-clone-ws",
-          Prefix: prefix,
-        })
-      );
-
-      if (listed.Contents?.length) {
-        await s3.send(
-          new DeleteObjectsCommand({
-            Bucket: "vercel-clone-ws",
-            Delete: {
-              Objects: listed.Contents.map(obj => ({ Key: obj.Key })),
-            },
-          })
-        );
-      }
+      await deleteS3Prefix(`__outputs/${project.id}/${deployment.id}/`);
     }
 
     await prisma.deployment.deleteMany({
@@ -420,6 +442,7 @@ router.delete("/project/:id", authMiddleware, async (req, res) => {
       where: { id: project.id },
     });
 
+    logEvent(req.user.id, 'project.deleted', { projectName: project.name });
     res.json({ success: true });
   } catch (err) {
     console.error("Delete project error:", err);
@@ -461,19 +484,22 @@ router.post("/project/:id/env", authMiddleware, async (req, res) => {
 
     await prisma.environmentVariable.upsert({
       where: {
-        projectId_key: {
+        projectId_key_environment: {
           projectId: project.id,
-          key: key
+          key: key,
+          environment: 'all',
         }
       },
       update: { value: encryptedValue },
       create: {
         projectId: project.id,
         key: key,
-        value: encryptedValue
+        value: encryptedValue,
+        environment: 'all',
       }
     });
 
+    logEvent(req.user.id, 'env.added', { projectId: req.params.id, meta: { key } });
     res.json({ success: true });
   } catch (err) {
     console.error("Env save error:", err);
@@ -493,18 +519,21 @@ router.post("/project/:id/env/bulk", authMiddleware, async (req, res) => {
 
     const upserts = variables.map((v) => {
       const encryptedValue = encrypt(v.value);
+      const environment = v.environment || 'all';
       return prisma.environmentVariable.upsert({
         where: {
-          projectId_key: {
+          projectId_key_environment: {
             projectId: project.id,
-            key: v.key
+            key: v.key,
+            environment,
           }
         },
-        update: { value: encryptedValue },
+        update: { value: encryptedValue, environment },
         create: {
           projectId: project.id,
           key: v.key,
-          value: encryptedValue
+          value: encryptedValue,
+          environment,
         }
       });
     });
@@ -525,14 +554,14 @@ router.delete("/project/:id/env/:key", authMiddleware, async (req, res) => {
     });
     if (!project) return res.status(404).json({ error: "Not found" });
 
-    await prisma.environmentVariable.delete({
+    await prisma.environmentVariable.deleteMany({
       where: {
-        projectId_key: {
-          projectId: project.id,
-          key: req.params.key
-        }
+        projectId: project.id,
+        key: req.params.key,
       }
     });
+
+    logEvent(req.user.id, 'env.deleted', { projectId: req.params.id, meta: { key: req.params.key } });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to delete env var" });
@@ -544,6 +573,12 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
     const schema = z.object({
       name: z.string().min(1).optional(),
       gitURL: z.string().url().optional(),
+      buildCommand:              z.string().optional(),
+      outputDir:                 z.string().optional(),
+      installCommand:            z.string().optional(),
+      rootDir:                   z.string().optional(),
+      notifyWebhookUrl:          z.string().url().optional().nullable(),
+      deploymentRetentionCount:  z.number().int().min(1).max(20).optional(),
     });
 
     const parsed = schema.safeParse(req.body);
@@ -592,12 +627,8 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
           networkConfiguration: {
             awsvpcConfiguration: {
               assignPublicIp: "ENABLED",
-              subnets: [
-                "subnet-0c880cd48957e3b04",
-                "subnet-0a8f5863458162f15",
-                "subnet-0df491ac14b434dc5",
-              ],
-              securityGroups: ["sg-07baa83f9ed7f4ba4"],
+              subnets: SUBNETS,
+              securityGroups: [SECURITY_GROUP],
             },
           },
           overrides: {
@@ -610,7 +641,7 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
                   { name: "DEPLOYEMENT_ID", value: deployment.id },
                   { name: "BRANCH", value: "main" },
                   { name: "USER_ENV_VARS", value: JSON.stringify(userEnvVarsObj) },
-                  { name: "AWS_LAMBDA_ROLE_ARN", value: "arn:aws:iam::097457367826:role/DeployrLambdaExecutionRole" },
+                  { name: "AWS_LAMBDA_ROLE_ARN", value: LAMBDA_EXECUTION_ROLE_ARN },
                 ],
               },
             ],
@@ -629,6 +660,7 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
       }
     }
 
+    logEvent(req.user.id, 'project.settings_updated', { projectId: req.params.id });
     res.json({ data: updated });
   } catch (err) {
     console.error("Update project error:", err);
@@ -656,6 +688,7 @@ router.post("/project/:id/domain", authMiddleware, async (req, res) => {
     },
   });
 
+  logEvent(req.user.id, 'domain.added', { projectId: req.params.id, meta: { domain } });
   res.json({
     message: "Add this TXT record to verify domain",
     record: {
@@ -689,6 +722,7 @@ router.post("/project/:id/domain/verify", authMiddleware, async (req, res) => {
       data: { domainVerified: true },
     });
 
+    logEvent(req.user.id, 'domain.verified', { projectId: req.params.id });
     res.json({ success: true });
   } catch (err) {
     res.status(400).json({ error: "DNS lookup failed" });
@@ -711,6 +745,7 @@ router.delete("/project/:id/domain", authMiddleware, async (req, res) => {
     },
   });
 
+  logEvent(req.user.id, 'domain.removed', { projectId: project.id });
   res.json({ success: true });
 });
 
@@ -734,6 +769,18 @@ router.get("/resolve/:host", async (req, res) => {
           functionUrl: deployment.functionUrl,
         });
       }
+    }
+
+    // Check preview subdomain (e.g. myapp-feature-auth.deployr.dev)
+    const previewDep = await prisma.deployment.findFirst({
+      where: { previewSubdomain: subdomain, status: "READY" },
+    });
+    if (previewDep) {
+      return res.json({
+        projectId: previewDep.projectId,
+        deploymentId: previewDep.id,
+        functionUrl: previewDep.functionUrl,
+      });
     }
 
     if (parts.length >= 3) {
@@ -800,104 +847,116 @@ router.get("/resolve/:host", async (req, res) => {
   }
 });
 
-router.post("/webhook/github", async (req, res) => {
-  try {
-    const payload = req.body;
+// ── Deploy hooks ──────────────────────────────────────────────────────────────
 
-    const repoUrl = payload.repository?.html_url;
-    if (!repoUrl) return res.sendStatus(200);
+router.post("/project/:id/deploy-hook", authMiddleware, async (req, res) => {
+  const project = await prisma.project.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+  });
+  if (!project) return res.status(404).json({ error: "Not found" });
 
-    const project = await prisma.project.findFirst({
-      where: { gitURL: repoUrl },
-    });
+  const token = crypto.randomBytes(24).toString("hex");
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { deployHookToken: token },
+  });
 
-    if (!project) return res.sendStatus(200);
-
-    const branch = payload.ref?.replace("refs/heads/", "") || "main";
-    const commitMessage = payload.head_commit?.message || "New commit pushed";
-
-    io.to(`user:${project.userId}`).emit("github_commit_pushed", {
-      projectId: project.id,
-      projectName: project.name,
-      branch,
-      commitMessage
-    });
-
-    console.log(`Webhook popup triggered for ${project.name} (user:${project.userId})`);
-    res.sendStatus(200);
-  } catch (err) {
-    console.error("Webhook deploy error:", err);
-    res.sendStatus(500);
-  }
+  const hookUrl = `${process.env.API_URL || 'http://localhost:9000'}/hooks/${token}`;
+  logEvent(req.user.id, 'deploy_hook.created', { projectId: project.id });
+  res.json({ hookUrl });
 });
 
-// ==========================================
-// Epic 5: Custom Domains & SSL
-// ==========================================
+router.delete("/project/:id/deploy-hook", authMiddleware, async (req, res) => {
+  const project = await prisma.project.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+  });
+  if (!project) return res.status(404).json({ error: "Not found" });
 
-router.post("/project/:id/domain", authMiddleware, async (req, res) => {
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { deployHookToken: null },
+  });
+  logEvent(req.user.id, 'deploy_hook.revoked', { projectId: project.id });
+  res.json({ success: true });
+});
+
+// ── Public status page ────────────────────────────────────────────────────────
+
+// GET /status/:slug — public project status page data (no auth required)
+router.get("/status/:slug", async (req, res) => {
   try {
-    const { domain } = req.body;
-    if (!domain) return res.status(400).json({ error: "Domain is required" });
-
-    const project = await prisma.project.findFirst({
-      where: { id: req.params.id, userId: req.user.id },
-    });
-
-    if (!project) return res.status(404).json({ error: "Project not found" });
-
-    const verificationToken = crypto.randomBytes(16).toString("hex");
-
-    await prisma.project.update({
-      where: { id: project.id },
-      data: {
-        customDomain: domain.toLowerCase(),
-        domainVerified: false,
-        domainVerificationToken: verificationToken,
+    const project = await prisma.project.findUnique({
+      where: { slug: req.params.slug },
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        isPublished: true,
+        uptimeChecks: {
+          orderBy: { checkedAt: "desc" },
+          take: 90,
+          select: { up: true, latencyMs: true, checkedAt: true },
+        },
+        deployments: {
+          where: { isActive: true },
+          take: 1,
+          select: { status: true, createdAt: true, branch: true },
+        },
       },
     });
 
-    res.json({ verificationToken });
+    if (!project || !project.isPublished) {
+      return res.status(404).json({ error: "Not found" });
+    }
+
+    const checks = project.uptimeChecks;
+    const total = checks.length;
+    const upCount = checks.filter(c => c.up).length;
+    const uptimePct = total > 0 ? Math.round((upCount / total) * 1000) / 10 : null;
+    const avgLatency = total > 0
+      ? Math.round(checks.reduce((s, c) => s + (c.latencyMs ?? 0), 0) / total)
+      : null;
+
+    res.json({
+      name: project.name,
+      slug: project.slug,
+      uptimePct,
+      avgLatency,
+      currentStatus: checks[0]?.up === false ? "degraded" : "operational",
+      activeDeployment: project.deployments[0] ?? null,
+      checks: checks.slice(0, 60).reverse(), // oldest → newest for chart
+    });
   } catch (err) {
-    console.error("Domain add error:", err);
-    res.status(500).json({ error: "Failed to add domain" });
+    console.error("Status page error:", err);
+    res.status(500).json({ error: "Failed to fetch status" });
   }
 });
 
-router.post("/project/:id/domain/verify", authMiddleware, async (req, res) => {
+// ── Uptime ────────────────────────────────────────────────────────────────────
+
+router.get("/project/:id/uptime", authMiddleware, async (req, res) => {
   try {
     const project = await prisma.project.findFirst({
       where: { id: req.params.id, userId: req.user.id },
+      select: { id: true },
+    });
+    if (!project) return res.status(404).json({ error: "Not found" });
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const checks = await prisma.uptimeCheck.findMany({
+      where: { projectId: project.id, checkedAt: { gte: since } },
+      orderBy: { checkedAt: 'asc' },
+      select: { up: true, statusCode: true, latencyMs: true, checkedAt: true },
     });
 
-    if (!project || !project.customDomain || !project.domainVerificationToken) {
-      return res.status(404).json({ error: "Invalid project state" });
-    }
+    const total = checks.length;
+    const upCount = checks.filter(c => c.up).length;
+    const uptimePct = total > 0 ? Math.round((upCount / total) * 1000) / 10 : null;
+    const latest = checks.at(-1) ?? null;
 
-    const expectedTxt = project.domainVerificationToken;
-    let verified = false;
-
-    try {
-      const records = await dns.resolveTxt(`_deployr.${project.customDomain}`);
-      verified = records.some(recordChunk => recordChunk.join('') === expectedTxt);
-    } catch (dnsErr) {
-      // Mock verification for local testing
-      console.log(`DNS lookup failed for _deployr.${project.customDomain}, mocking success for local dev.`);
-      verified = true;
-    }
-
-    if (verified) {
-      await prisma.project.update({
-        where: { id: project.id },
-        data: { domainVerified: true },
-      });
-      return res.json({ success: true });
-    }
-
-    res.status(400).json({ error: "Verification failed. TXT record not found." });
+    res.json({ uptimePct, total, upCount, latest, checks: checks.slice(-60) });
   } catch (err) {
-    console.error("Domain verify error:", err);
-    res.status(500).json({ error: "Verification failed" });
+    res.status(500).json({ error: "Failed to fetch uptime" });
   }
 });
 

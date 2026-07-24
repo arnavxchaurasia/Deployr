@@ -1,14 +1,13 @@
 const crypto = require("crypto");
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 const ALGORITHM = "aes-256-gcm";
 
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 if (!ENCRYPTION_KEY || Buffer.from(ENCRYPTION_KEY, "hex").length !== 32) {
-  console.warn("WARNING: ENCRYPTION_KEY is missing or invalid in .env. Environment Variables Vault encryption will fail.");
+  throw new Error("ENCRYPTION_KEY must be set to a 64-character hex string (32 bytes). Generate one with: openssl rand -hex 32");
 }
 
 function encrypt(text) {
-  if (!ENCRYPTION_KEY) return text;
   
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv(ALGORITHM, Buffer.from(ENCRYPTION_KEY, "hex"), iv);

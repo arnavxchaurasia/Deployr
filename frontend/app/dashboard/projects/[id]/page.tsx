@@ -25,7 +25,8 @@ import {
   Sparkles,
   Search,
   HelpCircle,
-  CheckCircle2
+  CheckCircle2,
+  CalendarClock,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -56,6 +57,11 @@ type ProjectAnalytics = {
   success: number;
   failed: number;
   avgBuildMs: number | null;
+};
+
+type UptimeData = {
+  uptimePct: number | null;
+  latest: { up: boolean; latencyMs: number | null } | null;
 };
 
 /* ------------------------------------
@@ -117,6 +123,7 @@ export default function ProjectPage() {
 
   const [project, setProject] = useState<Project | null>(null);
   const [analytics, setAnalytics] = useState<ProjectAnalytics | null>(null);
+  const [uptime, setUptime] = useState<UptimeData | null>(null);
   const [loading, setLoading] = useState(true);
   const [deploying, setDeploying] = useState(false);
 
@@ -131,6 +138,9 @@ export default function ProjectPage() {
 
       setProject(pRes.data.data);
       setAnalytics(aRes.data.data);
+
+      // Uptime is best-effort — don't fail the whole page if it errors
+      api.get(`/project/${id}/uptime`).then((r: { data: UptimeData }) => setUptime(r.data)).catch(() => {});
     } catch {
       setProject(null);
       setAnalytics(null);
@@ -374,7 +384,7 @@ export default function ProjectPage() {
           </Card>
 
           {/* Quick Stats Grid */}
-          <div className="grid sm:grid-cols-3 gap-4">
+          <div className="grid sm:grid-cols-4 gap-4">
             <Card className="p-5 rounded-2xl border border-zinc-200/50 dark:border-white/10 bg-white/40 dark:bg-black/40 backdrop-blur-md shadow-xl flex flex-col justify-between">
               <div className="flex items-center justify-between text-zinc-450 dark:text-zinc-400 mb-2">
                 <span className="text-[10px] font-bold uppercase tracking-wider">Deployments</span>
@@ -403,6 +413,29 @@ export default function ProjectPage() {
               <p className="text-2xl font-extrabold text-zinc-900 dark:text-white leading-none">
                 {formatDuration(analytics?.avgBuildMs)}
               </p>
+            </Card>
+
+            <Card className="p-5 rounded-2xl border border-zinc-200/50 dark:border-white/10 bg-white/40 dark:bg-black/40 backdrop-blur-md shadow-xl flex flex-col justify-between">
+              <div className="flex items-center justify-between text-zinc-450 dark:text-zinc-400 mb-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider">Uptime (24h)</span>
+                <Activity size={16} className={uptime?.latest?.up === false ? "text-red-500" : "text-emerald-500"} />
+              </div>
+              {uptime?.uptimePct !== null && uptime?.uptimePct !== undefined ? (
+                <div>
+                  <p className="text-2xl font-extrabold text-zinc-900 dark:text-white leading-none">
+                    {uptime.uptimePct}%
+                  </p>
+                  {uptime.latest && (
+                    <p className="text-[10px] text-zinc-500 mt-1">
+                      {uptime.latest.up
+                        ? `${uptime.latest.latencyMs ?? "—"}ms`
+                        : "Currently down"}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-400">No data yet</p>
+              )}
             </Card>
           </div>
         </div>
@@ -470,6 +503,15 @@ export default function ProjectPage() {
               >
                 <Activity size={14} className="mr-2" />
                 Traffic analytics
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/cron`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <CalendarClock size={14} className="mr-2 text-indigo-500" />
+                Cron jobs
               </Button>
 
               <div className="h-[1px] bg-zinc-250 dark:bg-white/5 my-2" />

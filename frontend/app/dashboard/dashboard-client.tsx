@@ -307,22 +307,82 @@ export default function DashboardOverview({
               </div>
               
               {filteredProjects.length === 0 ? (
-                <div className="p-16 flex flex-col items-center justify-center text-center">
-                  <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 flex items-center justify-center mb-4">
-                    <FolderGit2 size={28} className="text-zinc-400" />
+                searchQuery ? (
+                  <div className="p-16 flex flex-col items-center justify-center text-center">
+                    <div className="w-16 h-16 rounded-full bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-white/10 flex items-center justify-center mb-4">
+                      <FolderGit2 size={28} className="text-zinc-400" />
+                    </div>
+                    <h4 className="text-base font-bold text-zinc-900 dark:text-white mb-1">No matching projects</h4>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-sm mb-6 leading-relaxed">Try refining your search terms.</p>
                   </div>
-                  <h4 className="text-base font-bold text-zinc-900 dark:text-white mb-1">
-                    {searchQuery ? "No matching projects found" : "No projects deployed yet"}
-                  </h4>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-sm mb-6 leading-relaxed">
-                    {searchQuery ? "Try refining your search terms." : "Connect a GitHub repository to trigger your first global edge deployment in seconds."}
-                  </p>
-                  <Link href="/dashboard/new">
-                    <Button className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-5 font-semibold text-xs h-10 shadow-md shadow-indigo-500/10">
-                      Import Repository
-                    </Button>
-                  </Link>
-                </div>
+                ) : (
+                  <div className="p-10 space-y-6">
+                    <div className="text-center mb-8">
+                      <div className="inline-flex items-center gap-2 bg-indigo-500/10 text-indigo-400 text-xs font-semibold px-3 py-1.5 rounded-full border border-indigo-500/20 mb-4">
+                        <Sparkles size={12} />
+                        Get started in 3 steps
+                      </div>
+                      <h4 className="text-xl font-bold text-zinc-900 dark:text-white mb-2">Deploy your first project</h4>
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400 max-w-sm mx-auto">
+                        From git push to global edge in under 3 minutes.
+                      </p>
+                    </div>
+                    <div className="grid sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
+                      {[
+                        {
+                          step: "01",
+                          icon: <Github size={18} className="text-zinc-700 dark:text-zinc-300" />,
+                          title: "Connect GitHub",
+                          desc: "Add your GitHub Personal Access Token so Deployr can read your repositories.",
+                          href: "/dashboard/settings/integrations",
+                          cta: "Add token →",
+                        },
+                        {
+                          step: "02",
+                          icon: <FolderGit2 size={18} className="text-indigo-400" />,
+                          title: "Import a repo",
+                          desc: "Paste your repo URL and Deployr auto-detects your framework and build settings.",
+                          href: "/dashboard/new",
+                          cta: "Import repo →",
+                        },
+                        {
+                          step: "03",
+                          icon: <Rocket size={18} className="text-emerald-400" />,
+                          title: "Push to deploy",
+                          desc: "Every git push to main triggers a zero-downtime production deployment automatically.",
+                          href: null,
+                          cta: "git push origin main",
+                        },
+                      ].map(({ step, icon, title, desc, href, cta }) => (
+                        <div key={step} className="relative rounded-2xl border border-zinc-200 dark:border-white/10 bg-white/40 dark:bg-zinc-950/40 p-5 space-y-3 hover:border-indigo-500/30 transition-colors">
+                          <div className="flex items-center justify-between">
+                            <div className="w-9 h-9 rounded-xl bg-zinc-100 dark:bg-zinc-900 flex items-center justify-center border border-zinc-200 dark:border-white/10">
+                              {icon}
+                            </div>
+                            <span className="text-[10px] font-bold text-zinc-400 tabular-nums">{step}</span>
+                          </div>
+                          <div>
+                            <h5 className="text-sm font-bold text-zinc-900 dark:text-white">{title}</h5>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed">{desc}</p>
+                          </div>
+                          {href ? (
+                            <Link href={href} className="text-xs font-semibold text-indigo-500 hover:text-indigo-400 transition-colors">{cta}</Link>
+                          ) : (
+                            <code className="text-xs font-mono bg-zinc-100 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 px-2 py-1 rounded-lg">{cta}</code>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-center pt-2">
+                      <Link href="/dashboard/new">
+                        <Button className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl px-6 font-semibold text-sm h-11 shadow-md shadow-indigo-500/10 gap-2">
+                          <ArrowRight size={15} />
+                          Import your first repository
+                        </Button>
+                      </Link>
+                    </div>
+                  </div>
+                )
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm text-left">

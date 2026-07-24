@@ -288,13 +288,20 @@ async function getTrafficAnalytics(projectId) {
     .slice(0, 5)
     .map(([country, count]) => ({ country, count }));
 
+  // Average LCP: latencyMs > 0 rows are LCP readings (stored by the /collect endpoint)
+  const lcpReadings = logs.filter(l => l.latencyMs > 0).map(l => l.latencyMs);
+  const avgLcp = lcpReadings.length > 0
+    ? Math.round(lcpReadings.reduce((a, b) => a + b, 0) / lcpReadings.length)
+    : null;
+
   const data = {
     totalRequests,
     cacheHitRate,
     successRate,
     trend,
     topPaths,
-    topCountries
+    topCountries,
+    avgLcp,
   };
 
   cache.set(key, { ts: Date.now(), data });

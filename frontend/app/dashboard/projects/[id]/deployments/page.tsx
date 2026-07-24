@@ -16,7 +16,10 @@ import {
   GitBranch,
   ArrowRight,
   MonitorPlay,
-  StopCircle
+  StopCircle,
+  RotateCcw,
+  Eye,
+  XCircle,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -30,6 +33,7 @@ type Deployment = {
   createdAt: string;
   buildTimeMs: number | null;
   isProduction: boolean;
+  isPreview: boolean;
   previewUrl: string | null;
   canPromote: boolean;
   canDelete: boolean;
@@ -85,6 +89,7 @@ export default function DeploymentsPage() {
 
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cancelling, setCancelling] = useState<string | null>(null);
 
   const fetchDeployments = useCallback(async () => {
     if (!projectId) return;
@@ -116,6 +121,19 @@ export default function DeploymentsPage() {
     if (!confirm("Unpublish project? Production URL will go offline.")) return;
     await api.post(`/projects/${projectId}/unpublish`);
     fetchDeployments();
+  }
+
+  async function cancel(deploymentId: string) {
+    if (!confirm("Cancel this deployment?")) return;
+    setCancelling(deploymentId);
+    try {
+      await api.post(`/deployments/${deploymentId}/cancel`);
+      fetchDeployments();
+    } catch {
+      // silently ignore
+    } finally {
+      setCancelling(null);
+    }
   }
 
   async function remove(deploymentId: string) {
@@ -198,6 +216,12 @@ export default function DeploymentsPage() {
                           Production
                         </span>
                       )}
+                      {dep.isPreview && !dep.isProduction && (
+                        <span className="bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider shrink-0 flex items-center gap-1">
+                          <Eye size={9} />
+                          Preview
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-4 text-xs text-zinc-500 dark:text-zinc-400 flex-wrap">
@@ -252,12 +276,15 @@ export default function DeploymentsPage() {
                     )}
 
                     {dep.canPromote && (
-                      <Button 
+                      <Button
                         onClick={() => promote(dep.id)}
                         className="bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 rounded-xl h-9 px-3 text-xs font-bold"
                       >
-                        <Rocket size={14} className="mr-1.5" />
-                        Promote
+                        {dep.isPreview ? (
+                          <><Rocket size={14} className="mr-1.5" />Promote to Production</>
+                        ) : (
+                          <><RotateCcw size={14} className="mr-1.5" />Rollback to this</>
+                        )}
                       </Button>
                     )}
 
@@ -269,6 +296,21 @@ export default function DeploymentsPage() {
                       >
                         <StopCircle size={14} className="mr-1.5" />
                         Unpublish
+                      </Button>
+                    )}
+
+                    {(dep.status === "QUEUED" || dep.status === "BUILDING") && (
+                      <Button
+                        variant="ghost"
+                        onClick={() => cancel(dep.id)}
+                        disabled={cancelling === dep.id}
+                        className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-xl h-9 px-3 text-xs font-semibold"
+                      >
+                        {cancelling === dep.id
+                          ? <Loader2 size={14} className="mr-1.5 animate-spin" />
+                          : <XCircle size={14} className="mr-1.5" />
+                        }
+                        Cancel
                       </Button>
                     )}
 

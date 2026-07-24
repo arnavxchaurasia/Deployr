@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Check, Loader2 } from "lucide-react";
 import Script from "next/script";
 import { useState } from "react";
-import axios from "axios";
+import { api } from "@/lib/api";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -25,10 +25,7 @@ export default function PricingPage() {
     setLoading(true);
     try {
       // 1. Create order on the backend
-      const res = await axios.post("http://localhost:9000/payment/create-order", {}, {
-        withCredentials: true
-      });
-      
+      const res = await api.post("/payment/create-order");
       const { orderId, amount, keyId } = res.data;
 
       // 2. Initialize Razorpay Checkout
@@ -43,11 +40,11 @@ export default function PricingPage() {
         handler: async function (response: any) {
           try {
             // 3. Verify payment on backend
-            const { data } = await axios.post("http://localhost:9000/payment/verify", {
+            const { data } = await api.post("/payment/verify", {
               razorpay_payment_id: response.razorpay_payment_id,
               razorpay_order_id: response.razorpay_order_id,
               razorpay_signature: response.razorpay_signature,
-            }, { withCredentials: true });
+            });
 
             if (data.success) {
               toast.success("Payment successful! You are now a Pro user.");

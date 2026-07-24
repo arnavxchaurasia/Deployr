@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Github, FolderGit2, ArrowRight, Sparkles, AlertTriangle, Link as LinkIcon, CheckCircle2 } from "lucide-react";
+import { Github, FolderGit2, ArrowRight, Sparkles, AlertTriangle, Link as LinkIcon, CheckCircle2, Layers } from "lucide-react";
 import Link from "next/link";
 import { z } from "zod";
 import { motion } from "framer-motion";
@@ -17,8 +17,33 @@ export default function NewProjectPage() {
 
   const [name, setName] = useState("");
   const [gitURL, setGitURL] = useState("");
+  const [rootDir, setRootDir] = useState("");
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<{ name?: string; gitURL?: string }>({});
+  const [monorepo, setMonorepo] = useState<{ isMonorepo: boolean; type: string | null } | null>(null);
+  const [detectingMonorepo, setDetectingMonorepo] = useState(false);
+
+  async function detectFromUrl(url: string) {
+    // Parse owner/repo from a GitHub https URL
+    const match = url.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/);
+    if (!match) return;
+    const [, owner, repo] = match;
+    setDetectingMonorepo(true);
+    try {
+      const res = await fetch(
+        `http://localhost:9000/github/detect?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
+        { credentials: "include" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setMonorepo({ isMonorepo: data.isMonorepo ?? false, type: data.monoRepoType ?? null });
+      }
+    } catch {
+      // silently ignore — detection is best-effort
+    } finally {
+      setDetectingMonorepo(false);
+    }
+  }
 
   async function createProject() {
     if (!session) {
@@ -53,7 +78,7 @@ export default function NewProjectPage() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, gitURL }),
+        body: JSON.stringify({ name, gitURL, ...(rootDir.trim() ? { rootDir: rootDir.trim() } : {}) }),
       });
 
       const data = await res.json();
@@ -129,10 +154,12 @@ export default function NewProjectPage() {
                       onChange={e => {
                         setGitURL(e.target.value);
                         if (errors.gitURL) setErrors({ ...errors, gitURL: undefined });
+                        if (monorepo) setMonorepo(null);
                       }}
+                      onBlur={e => detectFromUrl(e.target.value)}
                       className={`pl-10 h-11 bg-zinc-50/50 dark:bg-zinc-900/30 rounded-xl transition-all focus:ring-2 focus:border-indigo-500 ${
-                        errors.gitURL 
-                          ? "border-red-500/50 focus:ring-red-500/50" 
+                        errors.gitURL
+                          ? "border-red-500/50 focus:ring-red-500/50"
                           : "border-zinc-200 dark:border-white/10 focus:ring-indigo-500/50"
                       }`}
                     />
@@ -143,7 +170,38 @@ export default function NewProjectPage() {
                       {errors.gitURL}
                     </p>
                   )}
+                  {detectingMonorepo && (
+                    <p className="text-xs text-zinc-400 flex items-center gap-1 mt-1">
+                      <Layers size={12} className="animate-pulse" />
+                      Detecting monorepo structure...
+                    </p>
+                  )}
                 </div>
+
+                {/* Monorepo banner + root dir input */}
+                {monorepo?.isMonorepo && (
+                  <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 px-4 py-3 space-y-3">
+                    <div className="flex items-start gap-2">
+                      <Layers size={15} className="text-indigo-400 mt-0.5 shrink-0" />
+                      <p className="text-xs text-indigo-300 leading-relaxed">
+                        <span className="font-semibold text-indigo-200">
+                          {monorepo.type === "turborepo" ? "Turborepo" : monorepo.type === "nx" ? "nx" : "pnpm workspace"} detected.
+                        </span>{" "}
+                        Set the Root Directory to the sub-app you want to deploy, e.g.{" "}
+                        <code className="font-mono bg-indigo-500/20 px-1 rounded">apps/web</code>.
+                      </p>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Root Directory</label>
+                      <Input
+                        placeholder="apps/web"
+                        value={rootDir}
+                        onChange={e => setRootDir(e.target.value)}
+                        className="h-9 bg-zinc-50/50 dark:bg-zinc-900/30 rounded-xl border-zinc-200 dark:border-white/10 text-sm font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {/* Project Name Input */}
                 <div className="space-y-2">

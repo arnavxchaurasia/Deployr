@@ -6,13 +6,11 @@ const axios = require("axios");
 const app = express();
 const server = http.createServer(app);
 
-const PORT = 8000;
+const PORT = process.env.PORT || 8000;
 
-const S3_BASE =
-  "https://vercel-clone-ws.s3.us-east-1.amazonaws.com/__outputs";
-
-const API_BASE = "http://localhost:9000";
-const SOCKET_BASE = "http://localhost:9002";
+const S3_BASE = process.env.S3_BASE || "https://vercel-clone-ws.s3.us-east-1.amazonaws.com/__outputs";
+const API_BASE = process.env.API_BASE || "http://localhost:9000";
+const SOCKET_BASE = process.env.SOCKET_BASE || "http://localhost:9002";
 
 const resolveCache = new Map();
 const RESOLVE_TTL = 30 * 1000;

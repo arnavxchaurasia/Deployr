@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { ArrowLeft, Activity, Globe, MousePointerClick, Zap } from "lucide-react";
+import { ArrowLeft, Activity, Globe, MousePointerClick, Zap, Timer } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -23,6 +23,7 @@ type TrafficData = {
   trend: { date: string; requests: number }[];
   topPaths: { path: string; count: number }[];
   topCountries: { country: string; count: number }[];
+  avgLcp: number | null;
 };
 
 export default function AnalyticsPage() {
@@ -69,13 +70,14 @@ export default function AnalyticsPage() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid sm:grid-cols-3 gap-6">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <Card className="p-6 border-zinc-200 dark:border-zinc-800 shadow-sm bg-gradient-to-br from-zinc-50 to-white dark:from-zinc-900 dark:to-black">
           <div className="flex items-center gap-2 mb-2">
             <MousePointerClick className="text-blue-500" size={20} />
-            <p className="text-sm font-medium text-zinc-500">Total Requests</p>
+            <p className="text-sm font-medium text-zinc-500">Page Views</p>
           </div>
           <p className="text-4xl font-bold">{data.totalRequests.toLocaleString()}</p>
+          <p className="text-xs text-zinc-400 mt-1">Last 7 days</p>
         </Card>
 
         <Card className="p-6 border-zinc-200 dark:border-zinc-800 shadow-sm bg-gradient-to-br from-emerald-50 to-white dark:from-emerald-950/20 dark:to-black">
@@ -92,6 +94,23 @@ export default function AnalyticsPage() {
             <p className="text-sm font-medium text-zinc-500">Reliability</p>
           </div>
           <p className="text-4xl font-bold">{data.successRate}%</p>
+        </Card>
+
+        <Card className="p-6 border-zinc-200 dark:border-zinc-800 shadow-sm bg-gradient-to-br from-orange-50 to-white dark:from-orange-950/20 dark:to-black">
+          <div className="flex items-center gap-2 mb-2">
+            <Timer className="text-orange-500" size={20} />
+            <p className="text-sm font-medium text-zinc-500">Avg LCP</p>
+          </div>
+          {data.avgLcp != null ? (
+            <>
+              <p className="text-4xl font-bold">{(data.avgLcp / 1000).toFixed(2)}s</p>
+              <p className={`text-xs mt-1 font-medium ${data.avgLcp <= 2500 ? "text-emerald-500" : data.avgLcp <= 4000 ? "text-amber-500" : "text-red-500"}`}>
+                {data.avgLcp <= 2500 ? "Good" : data.avgLcp <= 4000 ? "Needs improvement" : "Poor"}
+              </p>
+            </>
+          ) : (
+            <p className="text-2xl font-bold text-zinc-400">—</p>
+          )}
         </Card>
       </div>
 
@@ -142,6 +161,32 @@ export default function AnalyticsPage() {
             </ResponsiveContainer>
           )}
         </div>
+      </Card>
+
+      {/* Page Views — 7-day CSS bar chart */}
+      <Card className="p-6 border-zinc-200 dark:border-zinc-800">
+        <h2 className="text-lg font-semibold mb-6">Page Views (Last 7 Days)</h2>
+        {data.trend.length === 0 ? (
+          <p className="text-sm text-zinc-500">No page view data yet. Deploy your site to start tracking.</p>
+        ) : (
+          <div className="flex items-end gap-2 h-40">
+            {(() => {
+              const max = Math.max(...data.trend.map(d => d.requests), 1);
+              return data.trend.map((d, i) => (
+                <div key={i} className="flex flex-col items-center flex-1 gap-1 h-full justify-end">
+                  <span className="text-xs text-zinc-500">{d.requests}</span>
+                  <div
+                    className="w-full rounded-t bg-blue-500 dark:bg-blue-400 transition-all"
+                    style={{ height: `${Math.max((d.requests / max) * 100, 4)}%` }}
+                  />
+                  <span className="text-xs text-zinc-400 truncate w-full text-center">
+                    {d.date.slice(5)}
+                  </span>
+                </div>
+              ));
+            })()}
+          </div>
+        )}
       </Card>
 
       {/* Breakdown Grids */}

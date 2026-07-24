@@ -5,9 +5,11 @@ import { usePathname } from "next/navigation";
 import clsx from "clsx";
 
 const tabs = [
-  { label: "Profile", href: "/dashboard/settings" },
+  { label: "Profile",  href: "/dashboard/settings" },
   { label: "Security", href: "/dashboard/settings/security" },
-  { label: "Billing", href: "/dashboard/settings/billing" },
+  { label: "Billing",  href: "/dashboard/settings/billing" },
+  { label: "GitHub",   href: "/dashboard/settings/github" },
+  { label: "Team",     href: "/dashboard/settings/team" },
 ];
 
 export default function SettingsLayout({

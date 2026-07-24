@@ -4,6 +4,8 @@ const path = require("path");
 const { prisma } = require("../../lib/prisma");
 const { invalidateAnalytics } = require("../services/analyticsService");
 const { processTelemetry } = require("../services/aiService");
+const { postPRComment } = require("./githubService");
+const { decrypt } = require("../../lib/crypto");
 
 const kafka = new Kafka({
   clientId: "api-server",
@@ -55,7 +57,7 @@ async function initKafkaConsumer(io) {
           const telemetryStr = log.replace("[AI_TELEMETRY] ", "").trim();
           const telemetry = JSON.parse(telemetryStr);
           // Fire and forget AI analysis
-          processTelemetry(PROJECT_ID, DEPLOYEMENT_ID, telemetry);
+          processTelemetry(data.PROJECT_ID, DEPLOYEMENT_ID, telemetry);
         } catch (err) {
           console.error("Failed to parse AI telemetry", err);
         }
@@ -95,7 +97,16 @@ async function initKafkaConsumer(io) {
       if (isBuildFinished) {
         const deployment = await prisma.deployment.findUnique({
           where: { id: DEPLOYEMENT_ID },
-          select: { projectId: true, status: true, startedAt: true, trigger: true, branch: true },
+          select: {
+            projectId: true, status: true, startedAt: true, trigger: true, branch: true,
+            prNumber: true, isPreview: true, previewSubdomain: true,
+            project: {
+              select: {
+                githubOwner: true, githubRepo: true, slug: true,
+                user: { select: { githubToken: true, email: true, name: true } }
+              }
+            }
+          },
         });
 
         if (!deployment || deployment.status === "READY" || deployment.status === "FAILED") return;
@@ -127,14 +138,50 @@ async function initKafkaConsumer(io) {
         try { invalidateAnalytics(null, deployment.projectId); } catch {}
         console.log("Deployment promoted:", DEPLOYEMENT_ID);
 
+        // Debug fallback log
         if (deployment.trigger === "WEBHOOK") {
           console.log("\n=================================");
-          console.log("[GITHUB PR MOCK COMMENT - SUCCESS]");
+          console.log("[GITHUB PR COMMENT - SUCCESS]");
           console.log("✅ Preview Deployment Ready!");
           console.log(`Branch: ${deployment.branch}`);
-          console.log(`URL: http://localhost:8000/?project=${deployment.projectId}`);
+          console.log(`URL: ${process.env.APP_URL || 'http://localhost:8000'}/?project=${deployment.project?.slug}&deployment=${DEPLOYEMENT_ID}`);
           console.log("=================================\n");
         }
+
+        // Post real GitHub PR comment for preview deployments
+        if (
+          deployment.isPreview &&
+          deployment.prNumber &&
+          deployment.project?.githubOwner &&
+          deployment.project?.githubRepo &&
+          deployment.project?.user?.githubToken
+        ) {
+          const previewUrl = `${process.env.APP_URL || 'http://localhost:8000'}/?project=${deployment.project.slug}&deployment=${DEPLOYEMENT_ID}`;
+          const body = `### ✅ Preview Deployment Ready
+
+Your changes on branch \`${deployment.branch}\` have been deployed.
+
+| | |
+|---|---|
+| **Preview URL** | [${previewUrl}](${previewUrl}) |
+| **Deployment ID** | \`${DEPLOYEMENT_ID.slice(0, 8)}\` |
+
+*Deployed by [Deployr](https://deployr.app)*`;
+
+          const decryptedToken = decrypt(deployment.project.user.githubToken);
+          postPRComment(
+            deployment.project.githubOwner,
+            deployment.project.githubRepo,
+            deployment.prNumber,
+            body,
+            decryptedToken
+          ).then(() => {
+            console.log("PR success comment posted:", DEPLOYEMENT_ID);
+          }).catch((err) => {
+            console.error("Failed to post PR success comment:", err.message);
+          });
+        }
+
         return;
       }
 
@@ -143,7 +190,16 @@ async function initKafkaConsumer(io) {
       if (isBuildFailed) {
         const deployment = await prisma.deployment.findUnique({
           where: { id: DEPLOYEMENT_ID },
-          select: { projectId: true, status: true, startedAt: true, trigger: true, branch: true },
+          select: {
+            projectId: true, status: true, startedAt: true, trigger: true, branch: true,
+            prNumber: true, isPreview: true, previewSubdomain: true,
+            project: {
+              select: {
+                githubOwner: true, githubRepo: true, slug: true,
+                user: { select: { githubToken: true, email: true, name: true } }
+              }
+            }
+          },
         });
 
         if (!deployment || deployment.status === "READY" || deployment.status === "FAILED") return;
@@ -161,18 +217,48 @@ async function initKafkaConsumer(io) {
             data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs },
           });
 
-
-
           try { invalidateAnalytics(null, deployment.projectId); } catch {}
           console.log("Deployment FAILED:", DEPLOYEMENT_ID);
 
+          // Debug fallback log
           if (deployment.trigger === "WEBHOOK") {
             console.log("\n=================================");
-            console.log("[GITHUB PR MOCK COMMENT - FAILED]");
+            console.log("[GITHUB PR COMMENT - FAILED]");
             console.log("🚨 Preview Deployment Failed!");
             console.log(`Branch: ${deployment.branch}`);
-            console.log(`Logs: http://localhost:3000/dashboard/logs/${DEPLOYEMENT_ID}`);
+            console.log(`Logs: ${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/dashboard/logs/${DEPLOYEMENT_ID}`);
             console.log("=================================\n");
+          }
+
+          // Post real GitHub PR comment for preview deployments
+          if (
+            deployment.isPreview &&
+            deployment.prNumber &&
+            deployment.project?.githubOwner &&
+            deployment.project?.githubRepo &&
+            deployment.project?.user?.githubToken
+          ) {
+            const logsUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/dashboard/logs/${DEPLOYEMENT_ID}`;
+            const body = `### ❌ Preview Deployment Failed
+
+The deployment for branch \`${deployment.branch}\` failed.
+
+[View build logs](${logsUrl})
+
+*Deployed by [Deployr](https://deployr.app)*`;
+
+            const decryptedToken = decrypt(deployment.project.user.githubToken);
+            postPRComment(
+              deployment.project.githubOwner,
+              deployment.project.githubRepo,
+              deployment.prNumber,
+              body,
+              decryptedToken
+            ).then(() => {
+              console.log("PR failure comment posted:", DEPLOYEMENT_ID);
+            }).catch((err) => {
+              console.error("Failed to post PR failure comment:", err.message);
+            });
           }
         }
       }

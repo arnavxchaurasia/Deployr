@@ -1,7 +1,22 @@
 const { getToken } = require("next-auth/jwt");
 const { prisma } = require("../../lib/prisma");
+const { apiKeyMiddleware } = require("./apiKeyMiddleware");
 
+// Accepts both NextAuth session cookies and API key Bearer tokens.
+// API keys take priority — if the Authorization header has a valid dplr_ key
+// we skip the JWT check entirely.
 async function authMiddleware(req, res, next) {
+  // Try API key first
+  if (req.headers.authorization?.startsWith('Bearer dplr_')) {
+    return apiKeyMiddleware(req, res, (err) => {
+      if (err) return next(err);
+      // apiKeyMiddleware sets req.user on success; if it didn't call next with
+      // an error and req.user is set, we're authenticated.
+      if (req.user) return next();
+      // apiKeyMiddleware would have sent a 401 response — don't call next.
+    });
+  }
+
   try {
     const token = await getToken({
       req,
@@ -30,6 +45,7 @@ async function authMiddleware(req, res, next) {
     }
 
     req.user = { id: user.id, emailVerified: user.emailVerified };
+    req.authMethod = 'session';
     next();
   } catch (err) {
     console.error("Auth middleware error:", err);

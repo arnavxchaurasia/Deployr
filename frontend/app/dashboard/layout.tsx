@@ -7,14 +7,15 @@ import {
   LayoutDashboard,
   FolderGit2,
   Activity,
-  Settings,
+  BarChart2,
   Globe2,
-  Database,
   TerminalSquare,
+  Settings,
   ShieldCheck,
   PanelLeftClose,
   PanelLeftOpen,
-  AlertTriangle
+  AlertTriangle,
+  Zap,
 } from "lucide-react";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
@@ -31,14 +32,14 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
-  { label: "Overview", href: "/dashboard", icon: LayoutDashboard },
-  { label: "Deployments", href: "/dashboard/projects", icon: FolderGit2 },
-  { label: "Edge Network", href: "/dashboard/edge", icon: Globe2 },
-  { label: "Logs & Metrics", href: "/dashboard/activity", icon: Activity },
-  { label: "Databases", href: "/dashboard/db", icon: Database },
-  { label: "API Keys", href: "/dashboard/keys", icon: TerminalSquare },
-  { label: "Security", href: "/dashboard/settings/security", icon: ShieldCheck },
-  { label: "Settings", href: "/dashboard/settings", icon: Settings },
+  { label: "Overview",    href: "/dashboard",                   icon: LayoutDashboard },
+  { label: "Deployments", href: "/dashboard/projects",          icon: FolderGit2 },
+  { label: "Activity",    href: "/dashboard/activity",          icon: Activity },
+  { label: "Usage",       href: "/dashboard/usage",             icon: BarChart2 },
+  { label: "Domains",     href: "/dashboard/domains",           icon: Globe2 },
+  { label: "API Keys",    href: "/dashboard/keys",              icon: TerminalSquare },
+  { label: "Security",    href: "/dashboard/settings/security", icon: ShieldCheck },
+  { label: "Settings",    href: "/dashboard/settings",          icon: Settings },
 ];
 
 export default function DashboardLayout({
@@ -49,12 +50,14 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [emailVerified, setEmailVerified] = useState<boolean | null>(null);
+  const [plan, setPlan] = useState<"FREE" | "PRO" | "ENTERPRISE" | null>(null);
 
   useEffect(() => {
     async function checkVerification() {
       try {
         const res = await api.get("/auth/me");
         setEmailVerified(res.data?.emailVerified ?? false);
+        setPlan(res.data?.plan ?? "FREE");
       } catch (err) {
         console.error("Layout verification check error:", err);
       }
@@ -151,11 +154,28 @@ export default function DashboardLayout({
                   exit={{ opacity: 0 }}
                   className="rounded-2xl bg-gradient-to-tr from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 p-4"
                 >
-                  <h4 className="text-xs font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider mb-1">Deployr Pro</h4>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">You are using 12% of your bandwidth.</p>
-                  <div className="w-full h-1.5 bg-black/5 dark:bg-white/10 rounded-full overflow-hidden">
-                    <div className="w-[12%] h-full bg-indigo-500 rounded-full" />
-                  </div>
+                  {plan === "PRO" || plan === "ENTERPRISE" ? (
+                    <>
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Zap size={11} className="text-indigo-500" />
+                        <h4 className="text-xs font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">
+                          {plan === "ENTERPRISE" ? "Enterprise" : "Pro"}
+                        </h4>
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">All features unlocked.</p>
+                    </>
+                  ) : (
+                    <>
+                      <h4 className="text-xs font-bold text-zinc-600 dark:text-zinc-400 uppercase tracking-wider mb-1">Hobby Plan</h4>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">Upgrade for more bandwidth and features.</p>
+                      <Link
+                        href="/dashboard/billing"
+                        className="block w-full text-center text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg py-1.5 transition-colors"
+                      >
+                        Upgrade to Pro
+                      </Link>
+                    </>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>

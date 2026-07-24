@@ -11,8 +11,7 @@ const ecsClient = new ECSClient({
 const originalSend = ecsClient.send.bind(ecsClient);
 ecsClient.send = async (command) => {
   if (command.constructor.name === 'RunTaskCommand') {
-    const { PrismaClient } = require('@prisma/client');
-    const prisma = new PrismaClient();
+    const { prisma } = require('../../lib/prisma');
     
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
@@ -31,13 +30,20 @@ ecsClient.send = async (command) => {
   return originalSend(command);
 };
 
-const CLUSTER = "arn:aws:ecs:us-east-1:097457367826:cluster/builder-cluster-ws";
-const TASK = "arn:aws:ecs:us-east-1:097457367826:task-definition/builder-task";
+const CLUSTER = process.env.ECS_CLUSTER_ARN || "arn:aws:ecs:us-east-1:097457367826:cluster/builder-cluster-ws";
+const TASK = process.env.ECS_TASK_ARN || "arn:aws:ecs:us-east-1:097457367826:task-definition/builder-task";
+const SUBNETS = (process.env.ECS_SUBNETS || "subnet-0c880cd48957e3b04,subnet-0a8f5863458162f15,subnet-0df491ac14b434dc5")
+  .split(",").map(s => s.trim());
+const SECURITY_GROUP = process.env.ECS_SECURITY_GROUP || "sg-07baa83f9ed7f4ba4";
+const LAMBDA_EXECUTION_ROLE_ARN = process.env.LAMBDA_EXECUTION_ROLE_ARN || "arn:aws:iam::097457367826:role/DeployrLambdaExecutionRole";
 
 module.exports = {
   ecsClient,
   RunTaskCommand,
   StopTaskCommand,
   CLUSTER,
-  TASK
+  TASK,
+  SUBNETS,
+  SECURITY_GROUP,
+  LAMBDA_EXECUTION_ROLE_ARN,
 };

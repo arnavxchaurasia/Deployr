@@ -48,7 +48,7 @@ async function logSession(req, userId) {
 router.post("/auth/signup", async (req, res) => {
   const ip = req.ip;
 
-  if (!rateLimit(`signup-${ip}`, 50, 60_000)) {
+  if (!(await rateLimit(`signup-${ip}`, 50, 60_000))) {
     return res.status(429).json({ error: "Too many signups. Try later." });
   }
 
@@ -87,7 +87,7 @@ router.post("/auth/signup", async (req, res) => {
   });
 
   // Create 6-digit numeric OTP
-  const verifyToken = Math.floor(100000 + Math.random() * 900000).toString();
+  const verifyToken = crypto.randomInt(100000, 1000000).toString();
 
   await prisma.user.update({
     where: { id: user.id },
@@ -109,7 +109,7 @@ router.post("/auth/signup", async (req, res) => {
 router.post("/auth/login", async (req, res) => {
   const ip = req.ip;
 
-  if (!rateLimit(`login-${ip}`, 5, 60_000)) {
+  if (!(await rateLimit(`login-${ip}`, 5, 60_000))) {
     return res.status(429).json({ error: "Too many attempts. Try again later." });
   }
 
@@ -150,7 +150,7 @@ router.post("/auth/login", async (req, res) => {
 router.post("/auth/verify-otp", async (req, res) => {
   const ip = req.ip;
 
-  if (!rateLimit(`verify-otp-${ip}`, 10, 60_000)) {
+  if (!(await rateLimit(`verify-otp-${ip}`, 10, 60_000))) {
     return res.status(429).json({ error: "Too many attempts. Try later." });
   }
 
@@ -190,7 +190,7 @@ router.post("/auth/verify-otp", async (req, res) => {
 router.post("/auth/request-password-reset", async (req, res) => {
   const ip = req.ip;
 
-  if (!rateLimit(`reset-${ip}`, 5, 60_000)) {
+  if (!(await rateLimit(`reset-${ip}`, 5, 60_000))) {
     return res.status(429).json({ error: "Too many requests. Try later." });
   }
 
@@ -294,7 +294,7 @@ router.get("/auth/verify-email", async (req, res) => {
 
     // ✅ AFTER backend success → frontend
     return res.redirect(
-      "http://localhost:3000/auth?verified=true"
+      `${process.env.NEXTAUTH_URL || "http://localhost:3000"}/auth?verified=true`
     );
   } catch (err) {
     console.error(err);
@@ -305,16 +305,17 @@ router.get("/auth/verify-email", async (req, res) => {
 router.get("/auth/me", authMiddleware, async (req, res) => {
   const user = await prisma.user.findUnique({
     where: { id: req.user.id },
-    select: { 
-      id: true, 
-      email: true, 
-      name: true, 
+    select: {
+      id: true,
+      email: true,
+      name: true,
       image: true,
       emailVerified: true,
       githubUsername: true,
       role: true,
       bio: true,
-      company: true
+      company: true,
+      plan: true,
     },
   });
 
@@ -323,6 +324,14 @@ router.get("/auth/me", authMiddleware, async (req, res) => {
 
 router.post("/auth/oauth-sync", async (req, res) => {
   try {
+    const secret = req.headers["x-internal-secret"];
+    if (!process.env.INTERNAL_SECRET || !crypto.timingSafeEqual(
+      Buffer.from(secret || ""),
+      Buffer.from(process.env.INTERNAL_SECRET)
+    )) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
     const { email, name, image } = req.body;
 
     if (!email) {
@@ -365,7 +374,7 @@ router.post("/auth/oauth-sync", async (req, res) => {
 
 router.post("/auth/resend-verification", async (req, res) => {
   const ip = req.ip;
-if (!rateLimit(`verify-${ip}`, 5, 60_000)) {
+if (!(await rateLimit(`verify-${ip}`, 5, 60_000))) {
   return res.status(429).json({ error: "Too many requests" });
 }
 
@@ -376,7 +385,7 @@ if (!rateLimit(`verify-${ip}`, 5, 60_000)) {
     return res.json({ success: true });
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otp = crypto.randomInt(100000, 1000000).toString();
 
   await prisma.user.update({
     where: { id: user.id },
@@ -479,13 +488,17 @@ router.post("/user/avatar", authMiddleware, async (req, res) => {
     }
 
     let imageUrl = image;
-    
+
     // If it's a base64 string, upload to S3
     if (image.startsWith("data:image")) {
+      const ALLOWED_MIME_TYPES = { "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp" };
+      const mimeType = image.substring(image.indexOf(":") + 1, image.indexOf(";"));
+      const ext = ALLOWED_MIME_TYPES[mimeType];
+      if (!ext) {
+        return res.status(400).json({ error: "Unsupported image type. Use JPEG, PNG, GIF, or WebP." });
+      }
       const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
       const buffer = Buffer.from(base64Data, "base64");
-      const mimeType = image.substring(image.indexOf(":") + 1, image.indexOf(";")) || "image/png";
-      const ext = mimeType.split('/')[1] || "png";
 
       const s3Client = new S3Client({ region: "us-east-1" });
       const key = `avatars/${req.user.id}-${Date.now()}.${ext}`;
@@ -547,9 +560,6 @@ router.post("/user/disconnect-github", authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = router;
-
-// New endpoints for Session Management
 router.get("/auth/sessions", authMiddleware, async (req, res) => {
   try {
     const sessions = await prisma.loginSession.findMany({
@@ -575,3 +585,5 @@ router.delete("/auth/sessions/all", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Failed to delete sessions" });
   }
 });
+
+module.exports = router;

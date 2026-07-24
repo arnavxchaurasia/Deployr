@@ -1,5 +1,14 @@
 const nodemailer = require("nodemailer");
 
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#x27;");
+}
+
 let transporter = null;
 
 async function getTransporter() {
@@ -143,12 +152,14 @@ async function sendPasswordResetEmail(email, token) {
 }
 
 async function sendDeploymentSuccessEmail(email, projectName, deploymentId, url) {
+  const safeName = escapeHtml(projectName);
+  const safeId = escapeHtml(deploymentId);
   const content = `
     <h1>Deployment Successful 🎉</h1>
-    <p>Great news! Your project <strong>${projectName}</strong> has been successfully built and deployed to the global edge network.</p>
-    
+    <p>Great news! Your project <strong>${safeName}</strong> has been successfully built and deployed to the global edge network.</p>
+
     <div style="background-color: #fafafa; border: 1px solid #eaeaea; border-radius: 8px; padding: 20px; margin: 24px 0;">
-      <p style="margin: 0 0 12px 0; font-size: 14px; color: #737373;"><strong>Deployment ID:</strong> ${deploymentId}</p>
+      <p style="margin: 0 0 12px 0; font-size: 14px; color: #737373;"><strong>Deployment ID:</strong> ${safeId}</p>
       <p style="margin: 0; font-size: 14px; color: #737373;"><strong>Status:</strong> <span style="color: #10b981; font-weight: 500;">Ready</span></p>
     </div>
 
@@ -159,18 +170,20 @@ async function sendDeploymentSuccessEmail(email, projectName, deploymentId, url)
 
   await sendEmail({
     to: email,
-    subject: `Deployment Successful: ${projectName}`,
-    html: wrapHtml("Deployment Successful", `Your project ${projectName} is now live.`, content),
+    subject: `Deployment Successful: ${safeName}`,
+    html: wrapHtml("Deployment Successful", `Your project ${safeName} is now live.`, content),
   });
 }
 
 async function sendDeploymentFailureEmail(email, projectName, deploymentId, logsUrl) {
+  const safeName = escapeHtml(projectName);
+  const safeId = escapeHtml(deploymentId);
   const content = `
     <h1>Deployment Failed 🚨</h1>
-    <p>Unfortunately, the recent build for your project <strong>${projectName}</strong> has failed during the build step.</p>
-    
+    <p>Unfortunately, the recent build for your project <strong>${safeName}</strong> has failed during the build step.</p>
+
     <div style="background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 20px; margin: 24px 0;">
-      <p style="margin: 0 0 12px 0; font-size: 14px; color: #991b1b;"><strong>Deployment ID:</strong> ${deploymentId}</p>
+      <p style="margin: 0 0 12px 0; font-size: 14px; color: #991b1b;"><strong>Deployment ID:</strong> ${safeId}</p>
       <p style="margin: 0; font-size: 14px; color: #991b1b;"><strong>Status:</strong> <span style="font-weight: 500;">Failed</span></p>
     </div>
 
@@ -214,8 +227,9 @@ async function sendPaymentSuccessEmail(email, amount) {
 
 async function sendWelcomeEmail(email, name) {
   const baseUrl = process.env.NEXTAUTH_URL || "http://localhost:3000";
+  const safeName = escapeHtml(name);
   const content = `
-    <h1>Welcome to Deployr, ${name}! 🚀</h1>
+    <h1>Welcome to Deployr, ${safeName}! 🚀</h1>
     <p>Your email has been successfully verified, and your account is now fully active.</p>
     <p>Deployr is the ultimate platform for building, deploying, and scaling enterprise applications globally at the speed of thought.</p>
     
@@ -240,6 +254,24 @@ async function sendWelcomeEmail(email, name) {
   });
 }
 
+async function sendInvitationEmail(email, orgName, inviteUrl) {
+  const safeOrg = escapeHtml(orgName);
+  const content = `
+    <h1>You've been invited to join ${safeOrg}</h1>
+    <p>Someone has invited you to collaborate on <strong>${safeOrg}</strong> on Deployr.</p>
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${inviteUrl}" class="button">Accept Invitation</a>
+    </div>
+    <p style="font-size: 13px; color: #a3a3a3;">This invitation will expire in 7 days. If you did not expect this invite, you can safely ignore this email.</p>
+  `;
+
+  await sendEmail({
+    to: email,
+    subject: `You've been invited to join ${orgName} on Deployr`,
+    html: wrapHtml('Organization Invitation', `You have been invited to join ${orgName} on Deployr.`, content),
+  });
+}
+
 module.exports = {
   sendOTPEmail,
   sendPasswordResetEmail,
@@ -247,4 +279,5 @@ module.exports = {
   sendDeploymentFailureEmail,
   sendPaymentSuccessEmail,
   sendWelcomeEmail,
+  sendInvitationEmail,
 };

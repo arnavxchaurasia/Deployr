@@ -26,12 +26,20 @@ enum DeployTrigger {
   WEBHOOK
   ROLLBACK
   REDEPLOY
+  GH_PUSH
+  GH_PR
 }
 
 enum Plan {
   FREE
   PRO
   ENTERPRISE
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
 }
 
 model User {
@@ -53,12 +61,19 @@ model User {
   razorpayPaymentId String?
 
   githubUsername String?
+  githubToken    String?
   role           String?
   bio            String?
   company        String?
 
-  projects Project[]
+  totpSecret  String?
+  totpEnabled Boolean @default(false)
+
+  projects      Project[]
   loginSessions LoginSession[]
+  apiKeys       ApiKey[]
+  memberships   OrganizationMembership[]
+  auditLogs     AuditLog[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -121,6 +136,49 @@ model DeploymentRecommendation {
   createdAt DateTime @default(now())
 }
 
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships OrganizationMembership[]
+  projects    Project[]
+  invitations Invitation[]
+}
+
+model OrganizationMembership {
+  id       String   @id @default(uuid())
+  orgId    String
+  userId   String
+  role     OrgRole  @default(MEMBER)
+  joinedAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@index([orgId])
+}
+
+model Invitation {
+  id        String   @id @default(uuid())
+  orgId     String
+  email     String
+  role      OrgRole  @default(MEMBER)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([email])
+}
+
 model Project {
   id String @id @default(uuid())
 
@@ -137,6 +195,16 @@ model Project {
   repoProvider RepoProvider @default(GITHUB)
   framework    String?
 
+  // Build configuration
+  buildCommand   String? @map("build_command")
+  outputDir      String? @map("output_dir")
+  installCommand String? @map("install_command")
+  rootDir        String? @map("root_dir")
+
+  // Deploy hooks & notifications
+  deployHookToken  String? @unique @map("deploy_hook_token")
+  notifyWebhookUrl String? @map("notify_webhook_url")
+
   isActive Boolean @default(true)
 
   isPublished Boolean @default(true)
@@ -146,32 +214,45 @@ model Project {
 
   latestDeploymentId String?
 
+  // GitHub integration fields
+  githubOwner           String?
+  githubRepo            String?
+  githubDefaultBranch   String? @default("main")
+  deploymentRetentionCount Int  @default(3)
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  deployments         Deployment[]
+  orgId String?
+  org   Organization? @relation(fields: [orgId], references: [id])
+
+  deployments          Deployment[]
   environmentVariables EnvironmentVariable[]
-  requestLogs         RequestLog[]
+  requestLogs          RequestLog[]
+  uptimeChecks         UptimeCheck[]
+  cronJobs             CronJob[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@index([slug])
+  @@index([orgId])
 }
 
 model EnvironmentVariable {
   id        String   @id @default(uuid())
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  
-  key       String
-  value     String   // Encrypted value
-  
+
+  key         String
+  value       String   // Encrypted value
+  environment String   @default("all") // "all" | "production" | "preview"
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([projectId, key])
+  @@unique([projectId, key, environment])
 }
 
 model Deployment {
@@ -196,6 +277,11 @@ model Deployment {
   trigger DeployTrigger @default(MANUAL)
 
   logsUrl String?
+
+  isPreview        Boolean @default(false) @map("is_preview")
+  previewSubdomain String? @unique @map("preview_subdomain")
+
+  prNumber Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -237,14 +323,75 @@ model LoginSession {
   id        String   @id @default(uuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
+
   ip        String?
   userAgent String?
   device    String?
   os        String?
   browser   String?
-  
+
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+model ApiKey {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  prefix    String
+  keyHash   String   @unique
+
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+model UptimeCheck {
+  id        String   @id @default(uuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  up         Boolean
+  statusCode Int?
+  latencyMs  Int?
+  checkedAt  DateTime @default(now())
+
+  @@index([projectId, checkedAt])
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action      String
+  projectId   String?
+  projectName String?
+  meta        Json?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+}
+
+model CronJob {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name       String
+  expression String
+  endpoint   String?
+  useHook    Boolean  @default(false)
+  enabled    Boolean  @default(true)
+
+  lastRunAt  DateTime?
+  lastStatus String?
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([projectId])
 }

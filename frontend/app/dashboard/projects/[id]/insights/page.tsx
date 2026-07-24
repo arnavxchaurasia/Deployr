@@ -50,9 +50,9 @@ export default function InsightsPage() {
         </Button>
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
-            <Sparkles className="text-purple-500" /> AI Insights
+            <Sparkles className="text-purple-500" /> Build Recommendations
           </h1>
-          <p className="text-zinc-500 mt-1">Smart engineering recommendations based on your latest build.</p>
+          <p className="text-zinc-500 mt-1">Automated checks based on your project's dependencies and build output.</p>
         </div>
       </div>
 

@@ -29,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Wrangler (contains Cloudflare account credentials)
+.wrangler/
