@@ -6,7 +6,7 @@ const { rateLimit } = require('../middlewares/rateLimitMiddleware');
 const { encrypt, decrypt } = require('../../lib/crypto');
 const crypto = require('crypto');
 const dns = require('dns/promises');
-const { S3Client, ListObjectsV2Command, DeleteObjectsCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { s3Client, PutObjectCommand } = require('../services/awsService');
 const bcrypt = require('bcryptjs');
 const { ecsClient, CLUSTER, TASK, RunTaskCommand } = require('../services/awsService');
 const mailService = require('../services/mailService');
@@ -500,7 +500,6 @@ router.post("/user/avatar", authMiddleware, async (req, res) => {
       const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
       const buffer = Buffer.from(base64Data, "base64");
 
-      const s3Client = new S3Client({ region: "us-east-1" });
       const key = `avatars/${req.user.id}-${Date.now()}.${ext}`;
 
       await s3Client.send(new PutObjectCommand({

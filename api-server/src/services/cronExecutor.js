@@ -1,4 +1,5 @@
 const { prisma } = require('../../lib/prisma');
+const logger = require('../../lib/logger');
 
 // Parse cron expression → next run check (simple: check if current time matches)
 // Uses a basic field matching approach — minute, hour, day, month, weekday
@@ -69,12 +70,13 @@ async function runDueJobs() {
 function startCronExecutor() {
   // Run every minute at the start of the minute
   const msUntilNextMinute = (60 - new Date().getSeconds()) * 1000;
+  const onError = (err) => logger.error({ err }, '[CronExecutor] runDueJobs failed');
   setTimeout(() => {
-    runDueJobs().catch(console.error);
-    setInterval(() => runDueJobs().catch(console.error), 60_000);
+    runDueJobs().catch(onError);
+    setInterval(() => runDueJobs().catch(onError), 60_000);
   }, msUntilNextMinute);
 
-  console.log('[CronExecutor] Started — first tick in', Math.round(msUntilNextMinute / 1000), 's');
+  logger.info(`[CronExecutor] Started — first tick in ${Math.round(msUntilNextMinute / 1000)}s`);
 }
 
 module.exports = { startCronExecutor };

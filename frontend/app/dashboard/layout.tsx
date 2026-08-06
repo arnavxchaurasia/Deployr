@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
+import { GlobalSearch } from "@/components/global-search";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 import clsx from "clsx";
@@ -184,6 +185,9 @@ export default function DashboardLayout({
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-6 md:p-8">
+          <div className="flex justify-end mb-4">
+            <GlobalSearch />
+          </div>
           {emailVerified === false && (
             <div className="mb-6 rounded-2xl bg-amber-500/10 border border-amber-500/20 px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-amber-600 dark:text-amber-400">
               <div className="flex items-start sm:items-center gap-3">

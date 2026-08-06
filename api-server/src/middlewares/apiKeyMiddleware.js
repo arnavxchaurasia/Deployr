@@ -32,6 +32,7 @@ async function apiKeyMiddleware(req, res, next) {
 
     req.user = { id: apiKey.user.id, emailVerified: apiKey.user.emailVerified };
     req.authMethod = 'api_key';
+    req.apiKeyScope = apiKey.scope || 'full';
     next();
   } catch (err) {
     console.error('API key auth error:', err);

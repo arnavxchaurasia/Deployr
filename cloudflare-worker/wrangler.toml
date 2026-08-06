@@ -4,3 +4,7 @@ compatibility_date = "2023-10-30"
 
 [vars]
 API_BASE = "https://api.deployr.xyz"
+# PREVIEW_PROTECTION_SECRET is a secret, not a plaintext var — set it with:
+#   wrangler secret put PREVIEW_PROTECTION_SECRET
+# and it must match the api-server's PREVIEW_PROTECTION_SECRET env var exactly,
+# so the worker can verify preview-protection session cookies itself.

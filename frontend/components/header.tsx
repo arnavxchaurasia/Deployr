@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { UserMenu } from "./user-menu";
 import { ThemeToggle } from "./theme-toggle";
+import { NotificationBell } from "./notification-bell";
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 
@@ -71,7 +72,10 @@ export function Header() {
           <ThemeToggle />
 
           {session ? (
-            <UserMenu />
+            <>
+              <NotificationBell />
+              <UserMenu />
+            </>
           ) : (
             <Link
               href="/auth"

@@ -28,6 +28,7 @@ enum DeployTrigger {
   REDEPLOY
   GH_PUSH
   GH_PR
+  UPLOAD
 }
 
 enum Plan {
@@ -62,6 +63,9 @@ model User {
 
   githubUsername String?
   githubToken    String?
+  // Set when the user installs Deployr's GitHub App on their account/org —
+  // an alternative to githubToken (PAT) for authenticating GitHub API calls.
+  githubAppInstallationId Int?
   role           String?
   bio            String?
   company        String?
@@ -74,6 +78,7 @@ model User {
   apiKeys       ApiKey[]
   memberships   OrganizationMembership[]
   auditLogs     AuditLog[]
+  notifications Notification[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -144,6 +149,27 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Seat-based billing: plan governs build quota for org-owned projects
+  // (see quotaService), scaling with member count rather than any one
+  // member's personal plan. seatsPurchased is set from member count at
+  // time of upgrade; growing the team beyond it needs re-purchasing seats
+  // (no recurring subscription/webhook wired up yet — see billing routes).
+  plan            Plan    @default(FREE)
+  seatsPurchased  Int     @default(0)
+  razorpayOrderId String?
+
+  // Compliance/SIEM export — when set, every audit event for this org's
+  // projects is also POSTed here as it's recorded.
+  auditExportWebhookUrl String? @map("audit_export_webhook_url")
+
+  // Org-scoped lifecycle events — member joined/left, a project transferred
+  // into/out of this org, plan changed. Distinct from a Project's
+  // notifyWebhookUrl (deployment succeeded/failed) and from
+  // auditExportWebhookUrl (every audit event, compliance-shaped payload):
+  // this fires only for the small set of org-level events below, with a
+  // plain { event, orgId, ...details } JSON body.
+  webhookUrl String? @map("webhook_url")
+
   memberships OrganizationMembership[]
   projects    Project[]
   invitations Invitation[]
@@ -192,6 +218,11 @@ model Project {
   domainVerified          Boolean @default(false)
   domainVerificationToken String? @unique
 
+  // Cloudflare for SaaS custom hostname — automates TLS cert issuance/renewal
+  // for customer domains once DNS ownership is verified.
+  cfCustomHostnameId String? @map("cf_custom_hostname_id")
+  sslStatus          String? @default("none") @map("ssl_status")
+
   repoProvider RepoProvider @default(GITHUB)
   framework    String?
 
@@ -201,9 +232,96 @@ model Project {
   installCommand String? @map("install_command")
   rootDir        String? @map("root_dir")
 
+  // Which AWS region this project's builds run in and Lambda functions are
+  // created in. Foundation for multi-region deploy — a project picks one
+  // region today; automatic cross-region failover is not yet implemented.
+  region String @default("us-east-1")
+
   // Deploy hooks & notifications
   deployHookToken  String? @unique @map("deploy_hook_token")
   notifyWebhookUrl String? @map("notify_webhook_url")
+
+  // Post-deploy smoke test — when set, this path is fetched against the
+  // freshly built deployment before it's marked READY; a non-2xx/timeout
+  // fails the deployment instead of promoting broken output. Disabled (null)
+  // by default so existing projects are unaffected.
+  smokeTestPath String? @map("smoke_test_path")
+
+  // Custom Docker-based builds — an alternative to the fixed install/build
+  // pipeline in server/script.js. Requires the operator to have configured
+  // a privileged-mode AWS CodeBuild project (Fargate can't run Docker-in-
+  // Docker), see api-server/src/services/codeBuildService.js.
+  useDockerfile Boolean @default(false) @map("use_dockerfile")
+
+  // Ephemeral preview databases — a provider-agnostic hook: on every preview
+  // deployment Deployr POSTs { action: 'create', projectId, deploymentId, branch }
+  // here and expects back { envVar, value } (a connection string to inject
+  // into just that deployment's build), then POSTs { action: 'destroy',
+  // deploymentId } when the preview is cleaned up. Plug in your own
+  // Neon/PlanetScale/RDS branching service — Deployr doesn't integrate with
+  // a specific provider, only manages the create/destroy lifecycle calls.
+  previewDbProvisionWebhookUrl String? @map("preview_db_provision_webhook_url")
+
+  // Maintenance mode — serves a static page instead of the live deployment
+  // without touching isPublished/isActive, so flipping it off instantly
+  // restores normal serving with no redeploy needed.
+  maintenanceMode    Boolean @default(false) @map("maintenance_mode")
+  maintenanceMessage String? @map("maintenance_message")
+
+  // Deployment blackout windows — recurring weekly UTC windows during which
+  // /deploy calls (manual or webhook-triggered) are rejected rather than
+  // queued. Distinct from cron jobs, which make something happen on a
+  // schedule; this restricts permission instead. JSON array of
+  // { day: 0-6 (Sun-Sat, UTC), startMinute: 0-1439, endMinute: 0-1439 }.
+  blackoutWindows Json? @map("blackout_windows")
+
+  // Custom error pages — served by the Cloudflare worker in place of the
+  // origin's own 404 (missing static asset / SSR route) or 500 (Lambda/S3
+  // failure) response. Null means fall back to Deployr's built-in animated
+  // error page. Stored as full HTML, sanitized to strip <script> tags on
+  // save since it's rendered directly to visitors.
+  custom404Html String? @map("custom_404_html")
+  custom500Html String? @map("custom_500_html")
+
+  // Redirects & rewrites — evaluated by the Cloudflare worker before routing
+  // to Lambda/S3. JSON array of { source, destination, type: "redirect" |
+  // "rewrite", statusCode? }. `source` may end in "/*" to match a prefix,
+  // in which case "$1" in `destination` is replaced with the matched
+  // remainder. A "redirect" returns an HTTP redirect to `destination"; a
+  // "rewrite" changes which path is actually served, transparently to the
+  // visitor's URL bar.
+  redirectRules Json? @map("redirect_rules")
+
+  // Custom response headers — JSON array of { source, headers: { name: value } }.
+  // `source` matches like redirectRules (exact or "/*" prefix). Applied by
+  // the worker to the final response, letting a project set its own CSP/
+  // HSTS/CORS headers without an origin-side change.
+  headerRules Json? @map("header_rules")
+
+  // Geo-based access control — { mode: "allow" | "block", countries: [ISO
+  // 3166-1 alpha-2, ...] }. "block" rejects listed countries with a 403;
+  // "allow" rejects everything NOT listed. Null/absent means unrestricted.
+  // Evaluated at the worker from Cloudflare's request.cf.country.
+  geoRules Json? @map("geo_rules")
+
+  // Basic edge rate limiting — max requests per client IP per rolling
+  // minute, enforced by the Cloudflare worker via a best-effort per-colo
+  // counter (Cache API, not a global Durable Object), so it throttles abuse
+  // rather than guaranteeing an exact global cap. Null disables it.
+  rateLimitPerMinute Int? @map("rate_limit_per_minute")
+
+  // Cross-region failover — if set, and this project's uptime checks in
+  // `region` fail repeatedly (see failoverJob), Deployr automatically
+  // triggers a build in this fallback region and points traffic at it.
+  // Distinct from `region`, which is where new builds run by default.
+  failoverRegion String? @map("failover_region")
+
+  // Integrations marketplace — third-party connector config, keyed by
+  // connector id (e.g. "slack", "sentry", "datadog"). Shape is
+  // connector-specific (see integrationsService's CONNECTORS registry).
+  // Enabled connectors have their config values injected as build-time env
+  // vars alongside the project's own environment variables.
+  integrations Json? @map("integrations")
 
   isActive Boolean @default(true)
 
@@ -213,6 +331,16 @@ model Project {
   lastDeployedAt DateTime?
 
   latestDeploymentId String?
+
+  // Canary rollout — while set, a canaryPercent share of traffic is routed to
+  // canaryDeploymentId instead of the active production deployment, so a new
+  // deployment can be validated on live traffic before a full promote.
+  canaryDeploymentId String? @map("canary_deployment_id")
+  canaryPercent      Int     @default(0) @map("canary_percent")
+
+  // Preview deployment protection — when set, preview URLs require this
+  // password before the edge worker will serve them.
+  previewProtectionPasswordHash String? @map("preview_protection_password_hash")
 
   // GitHub integration fields
   githubOwner           String?
@@ -231,6 +359,9 @@ model Project {
   requestLogs          RequestLog[]
   uptimeChecks         UptimeCheck[]
   cronJobs             CronJob[]
+  featureFlags         FeatureFlag[]
+  statusSubscribers    StatusSubscriber[]
+  memberOverrides      ProjectMemberOverride[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -267,6 +398,7 @@ model Deployment {
 
   taskArn     String?
   functionUrl String?
+  functionUrls Json? @map("function_urls")
 
   startedAt  DateTime?
   finishedAt DateTime?
@@ -282,6 +414,10 @@ model Deployment {
   previewSubdomain String? @unique @map("preview_subdomain")
 
   prNumber Int?
+
+  // Denormalized from the project's region at trigger time, so a project's
+  // region change doesn't retroactively relabel past deployments.
+  region String @default("us-east-1")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -305,18 +441,21 @@ model LogEvent {
 }
 
 model RequestLog {
-  id        String   @id @default(uuid())
-  projectId String
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  timestamp DateTime @default(now())
-  path      String
-  status    Int
-  latencyMs Int
-  cached    Boolean
-  country   String?
-  city      String?
+  id           String   @id @default(uuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deploymentId String?
+  timestamp    DateTime @default(now())
+  path         String
+  status       Int
+  latencyMs    Int
+  cached       Boolean
+  country      String?
+  city         String?
+  bytes        Int      @default(0)
 
   @@index([projectId, timestamp])
+  @@index([deploymentId, timestamp])
 }
 
 model LoginSession {
@@ -347,6 +486,12 @@ model ApiKey {
   lastUsedAt DateTime?
   createdAt  DateTime @default(now())
 
+  // "full" (default, matches every key created before this existed) |
+  // "deploy" (can trigger/cancel/promote deploys and read, but not touch
+  // settings/billing/env vars) | "read" (GET only). Enforced centrally in
+  // authMiddleware.js, not per-route — see ApiScope.
+  scope String @default("full")
+
   @@index([userId])
 }
 
@@ -363,6 +508,20 @@ model UptimeCheck {
   @@index([projectId, checkedAt])
 }
 
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String?
+  meta      Json?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read, createdAt])
+}
+
 model AuditLog {
   id          String   @id @default(cuid())
   userId      String
@@ -374,6 +533,50 @@ model AuditLog {
   createdAt   DateTime @default(now())
 
   @@index([userId])
+}
+
+model FeatureFlag {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  key            String
+  enabled        Boolean @default(false)
+  rolloutPercent Int     @default(100) @map("rollout_percent")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+model StatusSubscriber {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  email     String
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, email])
+  @@index([projectId])
+}
+
+// Per-project role override — lets an org owner grant/restrict a specific
+// member's access to one project without changing their org-wide role.
+// Consulted by projectAccessService before falling back to the org role.
+model ProjectMemberOverride {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+
+  role      OrgRole
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, userId])
+  @@index([projectId])
 }
 
 model CronJob {

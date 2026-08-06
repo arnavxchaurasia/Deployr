@@ -14,9 +14,26 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Users, Plus, Loader2, Trash2, Crown, Shield,
-  UserCheck, Mail, ChevronDown, Building2,
+  UserCheck, Mail, ChevronDown, Building2, CreditCard, CheckCircle2, FileText, Webhook,
 } from "lucide-react";
 import { toast } from "sonner";
+
+declare global {
+  interface Window {
+    Razorpay: any;
+  }
+}
+
+function loadRazorpayScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (window.Razorpay) return resolve();
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load payment SDK"));
+    document.body.appendChild(script);
+  });
+}
 
 type OrgRole = "OWNER" | "ADMIN" | "MEMBER";
 
@@ -65,6 +82,149 @@ export default function TeamSettingsPage() {
   const [inviteRole, setInviteRole]   = useState<"MEMBER" | "ADMIN">("MEMBER");
   const [inviting, setInviting]       = useState(false);
 
+  // Billing state
+  const [billing, setBilling] = useState<{
+    plan: "FREE" | "PRO" | "ENTERPRISE";
+    memberCount: number;
+    seatsPurchased: number;
+    seatsExceeded: boolean;
+    pricePerSeat: number;
+    freeTierMemberLimit: number;
+  } | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
+
+  async function fetchBilling(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/billing`);
+      setBilling(data);
+    } catch {
+      setBilling(null);
+    }
+  }
+
+  const [auditExportUrl, setAuditExportUrl] = useState("");
+  const [auditExportEnabled, setAuditExportEnabled] = useState(false);
+  const [savingAuditExport, setSavingAuditExport] = useState(false);
+
+  async function fetchAuditExport(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/audit-export`);
+      setAuditExportEnabled(data.enabled);
+      setAuditExportUrl(data.webhookUrl || "");
+    } catch {
+      setAuditExportEnabled(false);
+    }
+  }
+
+  async function saveAuditExport() {
+    if (!selected) return;
+    setSavingAuditExport(true);
+    try {
+      await call.post(`/orgs/${selected.id}/audit-export`, { webhookUrl: auditExportUrl.trim() });
+      setAuditExportEnabled(true);
+      toast.success("Audit log export enabled");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to save audit export webhook");
+    } finally {
+      setSavingAuditExport(false);
+    }
+  }
+
+  async function disableAuditExport() {
+    if (!selected) return;
+    setSavingAuditExport(true);
+    try {
+      await call.delete(`/orgs/${selected.id}/audit-export`);
+      setAuditExportEnabled(false);
+      setAuditExportUrl("");
+      toast.success("Audit log export disabled");
+    } catch {
+      toast.error("Failed to disable audit export");
+    } finally {
+      setSavingAuditExport(false);
+    }
+  }
+
+  const [orgWebhookUrl, setOrgWebhookUrl] = useState("");
+  const [orgWebhookEnabled, setOrgWebhookEnabled] = useState(false);
+  const [savingOrgWebhook, setSavingOrgWebhook] = useState(false);
+
+  async function fetchOrgWebhook(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/webhook`);
+      setOrgWebhookEnabled(data.enabled);
+      setOrgWebhookUrl(data.webhookUrl || "");
+    } catch {
+      setOrgWebhookEnabled(false);
+    }
+  }
+
+  async function saveOrgWebhook() {
+    if (!selected) return;
+    setSavingOrgWebhook(true);
+    try {
+      await call.post(`/orgs/${selected.id}/webhook`, { webhookUrl: orgWebhookUrl.trim() });
+      setOrgWebhookEnabled(true);
+      toast.success("Team webhook enabled");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to save team webhook");
+    } finally {
+      setSavingOrgWebhook(false);
+    }
+  }
+
+  async function disableOrgWebhook() {
+    if (!selected) return;
+    setSavingOrgWebhook(true);
+    try {
+      await call.delete(`/orgs/${selected.id}/webhook`);
+      setOrgWebhookEnabled(false);
+      setOrgWebhookUrl("");
+      toast.success("Team webhook disabled");
+    } catch {
+      toast.error("Failed to disable team webhook");
+    } finally {
+      setSavingOrgWebhook(false);
+    }
+  }
+
+  async function upgradeTeam() {
+    if (!selected) return;
+    setUpgrading(true);
+    try {
+      await loadRazorpayScript();
+      const order = await call.post(`/orgs/${selected.id}/billing/create-order`, {});
+
+      const rzp = new window.Razorpay({
+        key: order.keyId,
+        amount: order.amount.toString(),
+        currency: "INR",
+        name: "Deployr Team",
+        description: `${order.seats} seat${order.seats !== 1 ? "s" : ""} · Team plan`,
+        order_id: order.orderId,
+        handler: async (response: any) => {
+          try {
+            await call.post(`/orgs/${selected.id}/billing/verify`, {
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            toast.success("Team upgraded to Pro");
+            fetchBilling(selected.id);
+          } catch {
+            toast.error("Payment verification failed");
+          }
+        },
+        theme: { color: "#4f46e5" },
+      });
+      rzp.open();
+    } catch {
+      toast.error("Failed to start checkout");
+    } finally {
+      setUpgrading(false);
+    }
+  }
+
   useEffect(() => { fetchOrgs(); }, []);
 
   async function fetchOrgs() {
@@ -98,9 +258,13 @@ export default function TeamSettingsPage() {
   async function selectOrg(org: Org) {
     setLoadingDetail(true);
     setSelected(null);
+    setBilling(null);
     try {
       const data = await call.get(`/orgs/${org.id}`);
       setSelected(data as OrgDetail);
+      fetchBilling(org.id);
+      fetchAuditExport(org.id);
+      fetchOrgWebhook(org.id);
     } catch {
       toast.error("Failed to load team details");
     } finally {
@@ -232,6 +396,114 @@ export default function TeamSettingsPage() {
         <div className="flex items-center justify-center py-12">
           <Loader2 size={18} className="animate-spin text-zinc-400" />
         </div>
+      )}
+
+      {selected && !loadingDetail && billing && (
+        <Card className="p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CreditCard size={16} className="text-indigo-500" />
+              <p className="text-sm font-medium">
+                {billing.plan === "FREE" ? "Free plan" : `${billing.plan} plan`} · {billing.memberCount} member{billing.memberCount !== 1 ? "s" : ""}
+              </p>
+            </div>
+            {billing.plan !== "FREE" && (
+              <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <CheckCircle2 size={12} /> {billing.seatsPurchased} seat{billing.seatsPurchased !== 1 ? "s" : ""} purchased
+              </span>
+            )}
+          </div>
+
+          {billing.plan === "FREE" && (
+            <p className="text-xs text-zinc-500">
+              Free teams are limited to {billing.freeTierMemberLimit} members. Upgrade for ₹{billing.pricePerSeat}/seat/month, unlimited members, and higher build quota.
+            </p>
+          )}
+          {billing.seatsExceeded && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              Your team has grown to {billing.memberCount} members but only {billing.seatsPurchased} seats are paid for — buy more seats to stay covered.
+            </p>
+          )}
+
+          {canManage && (billing.plan === "FREE" || billing.seatsExceeded) && (
+            <Button size="sm" onClick={upgradeTeam} disabled={upgrading} className="gap-2">
+              {upgrading ? <Loader2 size={13} className="animate-spin" /> : <CreditCard size={13} />}
+              {billing.plan === "FREE" ? "Upgrade team" : `Buy ${billing.memberCount} seats`}
+            </Button>
+          )}
+        </Card>
+      )}
+
+      {selected && !loadingDetail && canManage && (
+        <Card className="p-5 space-y-3">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <FileText size={16} className="text-indigo-500" />
+              <p className="text-sm font-medium">Audit log export</p>
+              {auditExportEnabled && (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 size={11} /> Enabled
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-500">
+              POST every audit event for this team's projects to your SIEM/webhook endpoint as it happens.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              value={auditExportUrl}
+              onChange={e => setAuditExportUrl(e.target.value)}
+              placeholder="https://your-siem.example.com/ingest"
+              className="text-sm font-mono"
+            />
+            <Button size="sm" onClick={saveAuditExport} disabled={savingAuditExport || !auditExportUrl.trim()} className="shrink-0">
+              {savingAuditExport ? <Loader2 size={13} className="animate-spin" /> : "Save"}
+            </Button>
+            {auditExportEnabled && (
+              <Button size="sm" variant="ghost" onClick={disableAuditExport} disabled={savingAuditExport} className="shrink-0 text-red-500 hover:text-red-600">
+                Disable
+              </Button>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {selected && !loadingDetail && canManage && (
+        <Card className="p-5 space-y-3">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Webhook size={16} className="text-indigo-500" />
+              <p className="text-sm font-medium">Team webhook</p>
+              {orgWebhookEnabled && (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <CheckCircle2 size={11} /> Enabled
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-500">
+              POST here on team-level events — a member joins or leaves, a project is transferred
+              into or out of this team, or the plan changes. Distinct from a project's deployment
+              notification webhook.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              value={orgWebhookUrl}
+              onChange={e => setOrgWebhookUrl(e.target.value)}
+              placeholder="https://your-endpoint.example.com/webhook"
+              className="text-sm font-mono"
+            />
+            <Button size="sm" onClick={saveOrgWebhook} disabled={savingOrgWebhook || !orgWebhookUrl.trim()} className="shrink-0">
+              {savingOrgWebhook ? <Loader2 size={13} className="animate-spin" /> : "Save"}
+            </Button>
+            {orgWebhookEnabled && (
+              <Button size="sm" variant="ghost" onClick={disableOrgWebhook} disabled={savingOrgWebhook} className="shrink-0 text-red-500 hover:text-red-600">
+                Disable
+              </Button>
+            )}
+          </div>
+        </Card>
       )}
 
       {selected && !loadingDetail && (

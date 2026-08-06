@@ -35,9 +35,12 @@ export default function GitHubSettingsPage() {
   const [repos, setRepos] = useState<Repo[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
 
+  const [appStatus, setAppStatus] = useState<{ available: boolean; installed: boolean; installUrl: string | null } | null>(null);
+
   // Check if a token is already saved by trying to list repos
   useEffect(() => {
     checkConnection();
+    call.get("/github/app/status").then(setAppStatus).catch(() => {});
   }, []);
 
   async function checkConnection() {
@@ -97,6 +100,37 @@ export default function GitHubSettingsPage() {
           and auto-detect framework settings.
         </p>
       </div>
+
+      {/* GitHub App card — preferred over a PAT when the operator has one configured */}
+      {appStatus?.available && (
+        <Card className="p-6 space-y-4 border-indigo-500/20 bg-indigo-500/5">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-full bg-indigo-100 dark:bg-indigo-500/10 flex items-center justify-center">
+              <GitBranch size={18} className="text-indigo-600 dark:text-indigo-400" />
+            </div>
+            <div className="flex-1">
+              <p className="text-sm font-medium">GitHub App (recommended)</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Fine-grained repo access, org-wide install, and no personal token to keep alive.
+              </p>
+            </div>
+            {appStatus.installed && (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-2.5 py-1 rounded-full">
+                <CheckCircle2 size={11} />
+                Installed
+              </span>
+            )}
+          </div>
+          {!appStatus.installed && appStatus.installUrl && (
+            <a href={appStatus.installUrl} target="_blank" rel="noreferrer">
+              <Button className="gap-2">
+                <GitBranch size={13} />
+                Connect via GitHub App
+              </Button>
+            </a>
+          )}
+        </Card>
+      )}
 
       {/* Connection card */}
       <Card className="p-6 space-y-5">

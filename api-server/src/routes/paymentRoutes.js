@@ -5,6 +5,7 @@ const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { rateLimit } = require('../middlewares/rateLimitMiddleware');
 const mailService = require('../services/mailService');
+const { checkBuildQuota } = require('../services/quotaService');
 
 const router = express.Router();
 
@@ -83,6 +84,21 @@ router.post("/payment/verify", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Razorpay verify error:", err);
     res.status(500).json({ error: "Failed to verify payment" });
+  }
+});
+
+router.get("/usage", authMiddleware, async (req, res) => {
+  try {
+    const quota = await checkBuildQuota({ userId: req.user.id });
+    res.json({
+      plan: quota.plan,
+      buildMinutesUsed: Math.round(quota.used * 10) / 10,
+      buildMinutesLimit: quota.limit,
+      quotaExceeded: !quota.allowed,
+    });
+  } catch (err) {
+    console.error("Usage fetch error:", err);
+    res.status(500).json({ error: "Failed to fetch usage" });
   }
 });
 

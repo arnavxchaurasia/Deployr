@@ -1,44 +1,37 @@
 const express = require('express');
 const { z } = require('zod');
-const { S3Client, ListObjectsV2Command, DeleteObjectsCommand } = require('@aws-sdk/client-s3');
 const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { logEvent } = require('../services/auditService');
 const { rateLimit } = require('../middlewares/rateLimitMiddleware');
 const { encrypt, decrypt } = require('../../lib/crypto');
 const crypto = require('crypto');
-const { ecsClient, CLUSTER, TASK, SUBNETS, SECURITY_GROUP, LAMBDA_EXECUTION_ROLE_ARN, RunTaskCommand, StopTaskCommand } = require('../services/awsService');
+const multer = require('multer');
+const { ecsClient, CLUSTER, TASK, SUBNETS, SECURITY_GROUP, LAMBDA_EXECUTION_ROLE_ARN, RunTaskCommand, StopTaskCommand, s3Client, PutObjectCommand, S3_BUCKET } = require('../services/awsService');
+const { triggerUploadBuild } = require('../services/deployTriggerService');
+const { checkBlackout } = require('../services/blackoutService');
+const { StopBuildCommand } = require('@aws-sdk/client-codebuild');
+const { codeBuildClient } = require('../services/codeBuildService');
 const mailService = require('../services/mailService');
 const { sendNotifyWebhook } = require('../services/notifyWebhookService');
+const { subscribe } = require('../utils/logBus');
+const { checkBuildQuota } = require('../services/quotaService');
+const { requireProjectAccess, projectAccessWhere } = require('../services/projectAccessService');
+const { cleanupDeployment } = require('../services/deploymentCleanupService');
+const { buildIntegrationEnvVars } = require('../services/integrationsService');
 
 const APP_URL = process.env.APP_URL || 'http://localhost:8000';
 const FRONTEND_URL = process.env.NEXTAUTH_URL || 'http://localhost:3000';
-const S3_BUCKET = process.env.S3_BUCKET || 'vercel-clone-ws';
-
-async function deleteS3Prefix(prefix) {
-  const s3 = new S3Client({ region: process.env.AWS_REGION || "us-east-1" });
-  let continuationToken;
-  do {
-    const listed = await s3.send(new ListObjectsV2Command({
-      Bucket: S3_BUCKET,
-      Prefix: prefix,
-      ContinuationToken: continuationToken,
-    }));
-    if (listed.Contents?.length) {
-      await s3.send(new DeleteObjectsCommand({
-        Bucket: S3_BUCKET,
-        Delete: { Objects: listed.Contents.map(obj => ({ Key: obj.Key })) },
-      }));
-    }
-    continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined;
-  } while (continuationToken);
-}
 
 function slugifyBranch(branch) {
   return branch.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
 const router = express.Router();
+
+// In-memory buffer is fine — archives are capped well below Node's default
+// heap pressure point, and this is a rare, low-concurrency action.
+const uploadArchive = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
 
 router.post("/internal/deployments/:id/status", async (req, res) => {
   try {
@@ -111,7 +104,7 @@ router.post("/deploy", authMiddleware, async (req, res) => {
     const deployBranch = branch || "main";
 
     const project = await prisma.project.findFirst({
-      where: { id: projectId, userId: req.user.id },
+      where: { id: projectId, ...projectAccessWhere(req.user.id, 'MEMBER') },
       include: { environmentVariables: true },
     });
 
@@ -126,6 +119,26 @@ router.post("/deploy", authMiddleware, async (req, res) => {
     // Email must be verified before deploying
     if (!req.user.emailVerified) {
       return res.status(403).json({ error: "Please verify your email address before deploying." });
+    }
+
+    // Enforce monthly build-minute quota for the project's plan (org plan
+    // for org-owned projects, otherwise the owner's personal plan)
+    const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+    if (!quota.allowed) {
+      return res.status(402).json({
+        error: `Monthly build-minute quota exceeded (${Math.round(quota.used)}/${quota.limit} min on the ${quota.plan} plan). Upgrade your plan to keep deploying.`,
+        quota,
+      });
+    }
+
+    // Deployment blackout window — rejects the request outright rather than
+    // queuing it for later, so the caller (CI, a person) knows immediately.
+    const blackout = checkBlackout(project);
+    if (blackout.blocked) {
+      return res.status(423).json({
+        error: "Deploys are blocked during this project's configured blackout window.",
+        window: blackout.window,
+      });
     }
 
     // Concurrent build guard — prevent multiple simultaneous builds
@@ -146,15 +159,14 @@ router.post("/deploy", authMiddleware, async (req, res) => {
     const allDeployments = await prisma.deployment.findMany({
       where: { projectId: project.id },
       orderBy: { createdAt: "desc" },
-      select: { id: true },
+      select: { id: true, projectId: true, functionUrl: true, functionUrls: true, region: true },
     });
 
     let warning;
     if (allDeployments.length >= retentionCount) {
       const toDelete = allDeployments.slice(retentionCount - 1);
       for (const dep of toDelete) {
-        await deleteS3Prefix(`__outputs/${project.id}/${dep.id}/`);
-        await prisma.deployment.delete({ where: { id: dep.id } });
+        await cleanupDeployment(dep);
       }
       if (toDelete.length > 0) {
         warning = `${toDelete.length} oldest deployment(s) removed to stay within your retention limit (${retentionCount}).`;
@@ -195,6 +207,12 @@ router.post("/deploy", authMiddleware, async (req, res) => {
         userEnvVarsObj[e.key] = decrypt(e.value);
       }
     }
+    // Enabled marketplace connectors (Slack/Sentry/Datadog/...) inject their
+    // own env vars too — a real environment variable with the same key wins.
+    // (snapshot before merging: target and the "restore precedence" source
+    // can't be the same object reference, or the restore is a no-op)
+    const explicitEnvVars = { ...userEnvVarsObj };
+    Object.assign(userEnvVarsObj, buildIntegrationEnvVars(project.integrations), explicitEnvVars);
 
     const command = new RunTaskCommand({
       cluster: CLUSTER,
@@ -255,6 +273,74 @@ router.post("/deploy", authMiddleware, async (req, res) => {
   }
 });
 
+// POST /project/:id/deploy/upload — deploy without git: a prebuilt
+// tar.gz (a static site's build output, or a Next.js standalone dir) is
+// uploaded directly and deployed as-is, skipping clone/install/build
+// entirely (see triggerUploadBuild + server/script.js's PREBUILT_ARCHIVE_S3_KEY
+// branch).
+router.post("/project/:id/deploy/upload", authMiddleware, uploadArchive.single('archive'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "archive file is required (field name: archive)" });
+    if (!/\.(tar\.gz|tgz)$/i.test(req.file.originalname || '')) {
+      return res.status(400).json({ error: "archive must be a .tar.gz or .tgz file" });
+    }
+
+    const project = await prisma.project.findFirst({
+      where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'MEMBER') },
+      include: { environmentVariables: true },
+    });
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    const ip = req.headers['x-forwarded-for'] || req.ip;
+    if (!(await rateLimit(`deploy-${req.user.id}-${ip}`, 10, 60_000))) {
+      return res.status(429).json({ error: "Too many deploy requests. Slow down." });
+    }
+    if (!req.user.emailVerified) {
+      return res.status(403).json({ error: "Please verify your email address before deploying." });
+    }
+
+    const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+    if (!quota.allowed) {
+      return res.status(402).json({
+        error: `Monthly build-minute quota exceeded (${Math.round(quota.used)}/${quota.limit} min on the ${quota.plan} plan). Upgrade your plan to keep deploying.`,
+        quota,
+      });
+    }
+
+    const inFlight = await prisma.deployment.findFirst({
+      where: { projectId: project.id, status: { in: ["QUEUED", "BUILDING"] } },
+    });
+    if (inFlight) {
+      return res.status(409).json({
+        error: "A build is already in progress for this project.",
+        deploymentId: inFlight.id,
+        status: inFlight.status,
+      });
+    }
+
+    const archiveS3Key = `__uploads/${project.id}/${crypto.randomUUID()}.tar.gz`;
+    await s3Client.send(new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: archiveS3Key,
+      Body: req.file.buffer,
+      ContentType: 'application/gzip',
+    }));
+
+    const deployment = await triggerUploadBuild({ project, archiveS3Key });
+
+    logEvent(req.user.id, 'deployment.triggered', {
+      projectId: project.id,
+      projectName: project.name,
+      meta: { trigger: 'UPLOAD', deploymentId: deployment.id },
+    });
+
+    res.json({ data: deployment });
+  } catch (err) {
+    console.error("Upload deploy error:", err);
+    res.status(500).json({ error: "Upload deploy failed" });
+  }
+});
+
 router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
   try {
     const deploymentId = req.params.id;
@@ -264,7 +350,7 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
       include: { project: true },
     });
 
-    if (!deployment || deployment.project.userId !== req.user.id) {
+    if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'ADMIN'))) {
       return res.status(404).json({ error: "Not found" });
     }
 
@@ -290,6 +376,9 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
           lastDeployedAt: new Date(),
           deployedAt: deployment.project.deployedAt ?? new Date(),
           isPublished: true,
+          // A full promote supersedes any in-progress canary rollout.
+          canaryDeploymentId: null,
+          canaryPercent: 0,
         },
       }),
     ]);
@@ -307,6 +396,69 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
   }
 });
 
+// POST /project/:id/canary — start or adjust a canary rollout. Routes
+// `percent` of traffic to `deploymentId` while the current active
+// deployment keeps serving the rest, so a candidate can be validated on
+// live traffic before a full promote (see /deployments/:id/promote, which
+// also clears any in-progress canary).
+router.post("/project/:id/canary", authMiddleware, async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const access = await requireProjectAccess(req.user.id, projectId, 'ADMIN');
+    if (!access) return res.status(404).json({ error: "Not found" });
+
+    const schema = z.object({
+      deploymentId: z.string(),
+      percent: z.number().int().min(1).max(99),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(parsed.error);
+
+    const canaryDeployment = await prisma.deployment.findFirst({
+      where: { id: parsed.data.deploymentId, projectId, status: "READY" },
+    });
+    if (!canaryDeployment) {
+      return res.status(400).json({ error: "Deployment must belong to this project and be READY" });
+    }
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { canaryDeploymentId: canaryDeployment.id, canaryPercent: parsed.data.percent },
+    });
+
+    logEvent(req.user.id, 'canary.started', {
+      projectId,
+      meta: { deploymentId: canaryDeployment.id, percent: parsed.data.percent },
+    });
+
+    res.json({ success: true, canaryDeploymentId: canaryDeployment.id, canaryPercent: parsed.data.percent });
+  } catch (err) {
+    console.error("Canary start error:", err);
+    res.status(500).json({ error: "Failed to start canary rollout" });
+  }
+});
+
+// DELETE /project/:id/canary — abort a canary rollout, reverting to 100%
+// on the existing active deployment.
+router.delete("/project/:id/canary", authMiddleware, async (req, res) => {
+  try {
+    const projectId = req.params.id;
+    const access = await requireProjectAccess(req.user.id, projectId, 'ADMIN');
+    if (!access) return res.status(404).json({ error: "Not found" });
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { canaryDeploymentId: null, canaryPercent: 0 },
+    });
+
+    logEvent(req.user.id, 'canary.aborted', { projectId });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Canary abort error:", err);
+    res.status(500).json({ error: "Failed to abort canary rollout" });
+  }
+});
+
 router.post("/deployments/:id/cancel", authMiddleware, async (req, res) => {
   try {
     const deployment = await prisma.deployment.findUnique({
@@ -314,7 +466,7 @@ router.post("/deployments/:id/cancel", authMiddleware, async (req, res) => {
       include: { project: true },
     });
 
-    if (!deployment || deployment.project.userId !== req.user.id) {
+    if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'MEMBER'))) {
       return res.status(404).json({ error: "Not found" });
     }
 
@@ -322,16 +474,22 @@ router.post("/deployments/:id/cancel", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Only in-progress deployments can be cancelled" });
     }
 
-    // Stop the ECS task if one is running
+    // Stop the running build — CodeBuild for Dockerfile-based projects (see
+    // deployTriggerService.js, which stores the CodeBuild build ID in the
+    // same taskArn field), otherwise the ECS Fargate task.
     if (deployment.taskArn) {
       try {
-        await ecsClient.send(new StopTaskCommand({
-          cluster: CLUSTER,
-          task: deployment.taskArn,
-          reason: "Cancelled by user",
-        }));
+        if (deployment.project?.useDockerfile) {
+          await codeBuildClient.send(new StopBuildCommand({ id: deployment.taskArn }));
+        } else {
+          await ecsClient.send(new StopTaskCommand({
+            cluster: CLUSTER,
+            task: deployment.taskArn,
+            reason: "Cancelled by user",
+          }));
+        }
       } catch (ecsErr) {
-        console.warn("[Cancel] ECS stop failed (task may have already stopped):", ecsErr.message);
+        console.warn("[Cancel] Build stop failed (task may have already stopped):", ecsErr.message);
       }
     }
 
@@ -355,12 +513,11 @@ router.delete("/deployments/:id", authMiddleware, async (req, res) => {
     include: { project: true },
   });
 
-  if (!deployment || deployment.project.userId !== req.user.id) {
+  if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'ADMIN'))) {
     return res.status(404).json({ error: "Not found" });
   }
 
-  await deleteS3Prefix(`__outputs/${deployment.projectId}/${deployment.id}/`);
-  await prisma.deployment.delete({ where: { id: deployment.id } });
+  await cleanupDeployment(deployment);
 
   res.json({ success: true });
 });
@@ -376,7 +533,7 @@ router.get("/logs/:id", authMiddleware, async (req, res) => {
       },
     });
 
-    if (!deployment || deployment.project.userId !== req.user.id) {
+    if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'MEMBER'))) {
       return res.status(404).json({ error: "Not found" });
     }
 
@@ -399,6 +556,67 @@ router.get("/logs/:id", authMiddleware, async (req, res) => {
   }
 });
 
+// GET /logs/:id/stream — Server-Sent Events tail of build/runtime logs.
+// Replays everything persisted so far, then streams new lines live until the
+// deployment reaches a terminal status (or the client disconnects).
+router.get("/logs/:id/stream", authMiddleware, async (req, res) => {
+  const deploymentId = req.params.id;
+
+  const deployment = await prisma.deployment.findUnique({
+    where: { id: deploymentId },
+    select: { id: true, status: true, project: { select: { userId: true } } },
+  });
+
+  if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'MEMBER'))) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const backlog = await prisma.logEvent.findMany({
+    where: { deploymentId },
+    orderBy: { timestamp: "asc" },
+    select: { log: true, timestamp: true },
+  });
+
+  for (const row of backlog) {
+    send("log", { log: row.log, timestamp: row.timestamp.toISOString() });
+  }
+
+  if (deployment.status === "READY" || deployment.status === "FAILED") {
+    send("status", { status: deployment.status });
+    return res.end();
+  }
+
+  const heartbeat = setInterval(() => res.write(":\n\n"), 15000);
+
+  const unsubscribe = subscribe(deploymentId, (msg) => {
+    if (msg.type === "log") {
+      send("log", { log: msg.log, timestamp: msg.timestamp });
+    } else if (msg.type === "status") {
+      send("status", { status: msg.status });
+      cleanup();
+      res.end();
+    }
+  });
+
+  function cleanup() {
+    clearInterval(heartbeat);
+    unsubscribe();
+  }
+
+  req.on("close", cleanup);
+});
+
 router.get("/deployment/:id", authMiddleware, async (req, res) => {
   try {
     const deployment = await prisma.deployment.findUnique({
@@ -408,7 +626,7 @@ router.get("/deployment/:id", authMiddleware, async (req, res) => {
       },
     });
 
-    if (!deployment || deployment.project.userId !== req.user.id) {
+    if (!deployment || !(await requireProjectAccess(req.user.id, deployment.projectId, 'MEMBER'))) {
       return res.status(404).json({ error: "Not found" });
     }
 
@@ -423,6 +641,60 @@ router.get("/deployment/:id", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Fetch deployment error:", err);
     res.status(500).json({ error: "Failed to fetch deployment" });
+  }
+});
+
+// GET /deployments/compare?a=<id>&b=<id> — commit/branch/build diff between
+// two deployments in the same project, plus an env var diff for admins (so
+// a rollback/promote decision can be made with full context beforehand).
+router.get("/deployments/compare", authMiddleware, async (req, res) => {
+  try {
+    const { a, b } = req.query;
+    if (!a || !b) return res.status(400).json({ error: "Query params a and b are required" });
+
+    const [depA, depB] = await Promise.all([
+      prisma.deployment.findUnique({ where: { id: a }, include: { project: { include: { environmentVariables: true } } } }),
+      prisma.deployment.findUnique({ where: { id: b }, include: { project: { include: { environmentVariables: true } } } }),
+    ]);
+
+    if (!depA || !depB) return res.status(404).json({ error: "Deployment not found" });
+    if (depA.projectId !== depB.projectId) {
+      return res.status(400).json({ error: "Deployments must belong to the same project" });
+    }
+
+    const access = await requireProjectAccess(req.user.id, depA.projectId, 'MEMBER');
+    if (!access) return res.status(404).json({ error: "Not found" });
+
+    const summarize = (d) => ({
+      id: d.id,
+      status: d.status,
+      branch: d.branch,
+      commitHash: d.commitHash,
+      trigger: d.trigger,
+      createdAt: d.createdAt,
+      finishedAt: d.finishedAt,
+      isActive: d.isActive,
+      isPreview: d.isPreview,
+    });
+
+    const response = { a: summarize(depA), b: summarize(depB) };
+
+    // Env vars aren't versioned per deployment in this schema — they're
+    // project-level, so this is the project's *current* config, not a
+    // historical snapshot from when either deployment was built. Still
+    // useful context before a rollback/promote. Admin-only since it
+    // requires decrypting values.
+    const isAdmin = await requireProjectAccess(req.user.id, depA.projectId, 'ADMIN');
+    if (isAdmin) {
+      response.currentEnvVars = depA.project.environmentVariables.map((e) => ({
+        key: e.key, environment: e.environment, value: decrypt(e.value),
+      }));
+    }
+
+    res.json(response);
+  } catch (err) {
+    console.error("Compare deployments error:", err);
+    res.status(500).json({ error: "Failed to compare deployments" });
   }
 });
 

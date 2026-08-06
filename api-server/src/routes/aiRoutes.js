@@ -2,6 +2,7 @@ const express = require('express');
 const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { generateInsights } = require('../services/insightsService');
+const { projectAccessWhere } = require('../services/projectAccessService');
 
 const router = express.Router();
 
@@ -10,7 +11,7 @@ const router = express.Router();
 router.get('/project/:id/insights', authMiddleware, async (req, res) => {
   try {
     const project = await prisma.project.findFirst({
-      where: { id: req.params.id, userId: req.user.id },
+      where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'MEMBER') },
     });
 
     if (!project) return res.status(404).json({ error: 'Not found' });
@@ -49,7 +50,7 @@ router.patch('/project/:id/insights/:recommendationId', authMiddleware, async (r
 
     // Verify the project belongs to this user
     const project = await prisma.project.findFirst({
-      where: { id: req.params.id, userId: req.user.id },
+      where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'MEMBER') },
       select: { id: true },
     });
 

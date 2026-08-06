@@ -20,6 +20,8 @@ import {
   RotateCcw,
   Eye,
   XCircle,
+  GitCompare,
+  Percent,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -90,6 +92,62 @@ export default function DeploymentsPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+
+  const [canary, setCanary] = useState<{ deploymentId: string | null; percent: number }>({ deploymentId: null, percent: 0 });
+  const [savingCanary, setSavingCanary] = useState(false);
+
+  const fetchCanary = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const res = await api.get(`/project/${projectId}`);
+      setCanary({ deploymentId: res.data.data.canaryDeploymentId, percent: res.data.data.canaryPercent });
+    } catch {
+      // non-fatal
+    }
+  }, [projectId]);
+
+  async function setCanaryPercent(deploymentId: string, percent: number) {
+    setSavingCanary(true);
+    try {
+      await api.post(`/project/${projectId}/canary`, { deploymentId, percent });
+      await fetchCanary();
+    } catch {
+      // toast handled globally by api client interceptor if configured; keep silent fallback
+    } finally {
+      setSavingCanary(false);
+    }
+  }
+
+  async function abortCanary() {
+    setSavingCanary(true);
+    try {
+      await api.delete(`/project/${projectId}/canary`);
+      await fetchCanary();
+    } finally {
+      setSavingCanary(false);
+    }
+  }
+
+  async function promoteCanary() {
+    if (!canary.deploymentId) return;
+    setSavingCanary(true);
+    try {
+      await api.post(`/deployments/${canary.deploymentId}/promote`);
+      await fetchCanary();
+      fetchDeployments();
+    } finally {
+      setSavingCanary(false);
+    }
+  }
+
+  function toggleCompare(id: string) {
+    setCompareSelection((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= 2) return [prev[1], id];
+      return [...prev, id];
+    });
+  }
 
   const fetchDeployments = useCallback(async () => {
     if (!projectId) return;
@@ -106,11 +164,12 @@ export default function DeploymentsPage() {
 
   useEffect(() => {
     fetchDeployments();
+    fetchCanary();
     const interval = setInterval(() => {
       if (document.visibilityState === "visible") fetchDeployments();
     }, 5000);
     return () => clearInterval(interval);
-  }, [projectId, fetchDeployments]);
+  }, [projectId, fetchDeployments, fetchCanary]);
 
   async function promote(deploymentId: string) {
     await api.post(`/deployments/${deploymentId}/promote`);
@@ -182,6 +241,52 @@ export default function DeploymentsPage() {
         </Button>
       </div>
 
+      {canary.deploymentId && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm flex-wrap">
+          <Percent size={15} className="text-amber-500 shrink-0" />
+          <span className="text-zinc-600 dark:text-zinc-300">
+            Canary active — <span className="font-mono">{canary.deploymentId.slice(0, 8)}</span> is getting{" "}
+            <strong>{canary.percent}%</strong> of traffic
+          </span>
+          <div className="flex-1" />
+          {[10, 50].map((p) => (
+            <Button key={p} size="sm" variant="outline" disabled={savingCanary || canary.percent === p}
+              onClick={() => setCanaryPercent(canary.deploymentId!, p)} className="rounded-lg h-8 text-xs">
+              {p}%
+            </Button>
+          ))}
+          <Button size="sm" disabled={savingCanary} onClick={promoteCanary} className="rounded-lg h-8 text-xs font-semibold">
+            Promote to 100%
+          </Button>
+          <Button size="sm" variant="ghost" disabled={savingCanary} onClick={abortCanary}
+            className="rounded-lg h-8 text-xs text-red-500 hover:text-red-600">
+            Abort
+          </Button>
+        </div>
+      )}
+
+      {compareSelection.length > 0 && (
+        <div className="flex items-center gap-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-4 py-3 text-sm">
+          <GitCompare size={15} className="text-indigo-500 shrink-0" />
+          <span className="text-zinc-600 dark:text-zinc-300">
+            {compareSelection.length === 1 ? "Select one more deployment to compare" : "2 deployments selected"}
+          </span>
+          <div className="flex-1" />
+          {compareSelection.length === 2 && (
+            <Button
+              size="sm"
+              onClick={() => router.push(`/dashboard/projects/${projectId}/deployments/compare?a=${compareSelection[0]}&b=${compareSelection[1]}`)}
+              className="rounded-lg h-8 text-xs font-semibold"
+            >
+              Compare
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => setCompareSelection([])} className="rounded-lg h-8 text-xs">
+            Clear
+          </Button>
+        </div>
+      )}
+
       {deployments.length === 0 ? (
         <Card className="p-16 rounded-2xl border border-zinc-200/60 dark:border-white/10 bg-white/40 dark:bg-black/40 backdrop-blur-md text-center">
           <MonitorPlay size={48} className="text-zinc-300 dark:text-zinc-700 mx-auto mb-4" />
@@ -207,6 +312,13 @@ export default function DeploymentsPage() {
                   {/* Left info */}
                   <div className="space-y-3 flex-1 min-w-0">
                     <div className="flex items-center gap-3">
+                      <input
+                        type="checkbox"
+                        checked={compareSelection.includes(dep.id)}
+                        onChange={() => toggleCompare(dep.id)}
+                        title="Select to compare"
+                        className="w-3.5 h-3.5 rounded accent-indigo-500"
+                      />
                       <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
                         {dep.id.slice(0, 8)}
                       </span>
@@ -285,6 +397,18 @@ export default function DeploymentsPage() {
                         ) : (
                           <><RotateCcw size={14} className="mr-1.5" />Rollback to this</>
                         )}
+                      </Button>
+                    )}
+
+                    {dep.canPromote && !canary.deploymentId && (
+                      <Button
+                        variant="outline"
+                        disabled={savingCanary}
+                        onClick={() => setCanaryPercent(dep.id, 10)}
+                        className="rounded-xl h-9 px-3 text-xs font-semibold"
+                      >
+                        <Percent size={14} className="mr-1.5" />
+                        Start canary at 10%
                       </Button>
                     )}
 

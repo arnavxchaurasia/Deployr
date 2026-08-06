@@ -8,11 +8,18 @@ const projectRoutes = require("./routes/projectRoutes");
 const deploymentRoutes = require("./routes/deploymentRoutes");
 const analyticsRoutes = require("./routes/analyticsRoutes");
 const githubRoutes = require("./routes/githubRoutes");
+const gitlabRoutes = require("./routes/gitlabRoutes");
+const bitbucketRoutes = require("./routes/bitbucketRoutes");
 
 const aiRoutes = require("./routes/aiRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const orgRoutes = require("./routes/orgRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
+const searchRoutes = require("./routes/searchRoutes");
+const featureFlagRoutes = require("./routes/featureFlagRoutes");
+const integrationsRoutes = require("./routes/integrationsRoutes");
+const projectMemberRoutes = require("./routes/projectMemberRoutes");
 
 const app = express();
 
@@ -53,8 +60,15 @@ app.use("/", analyticsRoutes);
 app.use("/", aiRoutes);
 app.use("/", paymentRoutes);
 app.use("/github", githubRoutes);
+app.use("/gitlab", gitlabRoutes);
+app.use("/bitbucket", bitbucketRoutes);
 app.use("/", dashboardRoutes);
 app.use("/", orgRoutes);
+app.use("/", notificationRoutes);
+app.use("/", searchRoutes);
+app.use("/", featureFlagRoutes);
+app.use("/", integrationsRoutes);
+app.use("/", projectMemberRoutes);
 
 const metricsRoutes = require("./routes/metricsRoutes");
 app.use("/", metricsRoutes);

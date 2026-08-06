@@ -1,24 +1,54 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Globe, CheckCircle, Loader2, AlertTriangle, Shield, ExternalLink } from "lucide-react";
+import { Globe, CheckCircle, Loader2, AlertTriangle, Shield, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 
 type Status = "idle" | "added" | "verified" | "error";
+type SslStatus = "none" | "pending" | "pending_validation" | "pending_issuance" | "active" | "error" | string;
 
 export default function DomainsPage() {
   const { id } = useParams();
 
   const [domain, setDomain] = useState("");
   const [token, setToken] = useState<string | null>(null);
+  const [cnameTarget, setCnameTarget] = useState<string | null>(null);
 
   const [status, setStatus] = useState<Status>("idle");
+  const [sslStatus, setSslStatus] = useState<SslStatus>("none");
   const [loading, setLoading] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [error, setError] = useState("");
+
+  const [purgePaths, setPurgePaths] = useState("/");
+  const [purging, setPurging] = useState(false);
+
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  function startSslPolling() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await api.get(`/project/${id}/domain/status`);
+        setSslStatus(res.data.sslStatus);
+        if (res.data.sslStatus === "active" || res.data.sslStatus === "error") {
+          if (pollRef.current) clearInterval(pollRef.current);
+        }
+      } catch {
+        // non-fatal — keep polling
+      }
+    }, 5000);
+  }
 
   async function addDomain() {
     setError("");
@@ -27,6 +57,7 @@ export default function DomainsPage() {
     try {
       const res = await api.post(`/project/${id}/domain`, { domain });
       setToken(res.data.verificationToken);
+      setCnameTarget(res.data.cnameTarget);
       setStatus("added");
     } catch (err) {
       console.error(err);
@@ -42,14 +73,31 @@ export default function DomainsPage() {
     setVerifying(true);
 
     try {
-      await api.post(`/project/${id}/domain/verify`);
+      const res = await api.post(`/project/${id}/domain/verify`);
       setStatus("verified");
+      setSslStatus(res.data.sslStatus ?? "none");
+      if (res.data.sslStatus && res.data.sslStatus !== "active" && res.data.sslStatus !== "error") {
+        startSslPolling();
+      }
     } catch (err) {
       console.error(err);
       setError("Verification failed. DNS record not found yet.");
       setStatus("error");
     } finally {
       setVerifying(false);
+    }
+  }
+
+  async function purgeCache() {
+    setPurging(true);
+    try {
+      const paths = purgePaths.split(",").map(p => p.trim()).filter(Boolean);
+      await api.post(`/project/${id}/cache/purge`, { paths: paths.length ? paths : ["/"] });
+      toast.success("Cache purged");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || "Failed to purge cache");
+    } finally {
+      setPurging(false);
     }
   }
 
@@ -136,7 +184,7 @@ export default function DomainsPage() {
 
           {status === "verified" && (
             <div className="mt-4 pt-4 border-t border-dashed space-y-4">
-              <h3 className="text-sm font-medium text-green-600">Domain verified — two more steps to go live:</h3>
+              <h3 className="text-sm font-medium text-green-600">Domain verified — one more step to go live:</h3>
 
               {/* Step A: CNAME */}
               <div className="space-y-2">
@@ -145,33 +193,59 @@ export default function DomainsPage() {
                   Add a CNAME record in your DNS provider pointing your domain to our edge:
                 </p>
                 <div className="bg-black text-green-400 rounded-lg p-4 text-sm overflow-x-auto">
-                  <pre className="whitespace-pre-wrap">{`CNAME   ${domain}   edge.deployr.com`}</pre>
+                  <pre className="whitespace-pre-wrap">{`CNAME   ${domain}   ${cnameTarget ?? "edge.deployr.com"}`}</pre>
                 </div>
               </div>
 
-              {/* Step B: SSL via Cloudflare */}
+              {/* Step B: SSL — automatic once the CNAME above is live */}
               <div className="space-y-2 rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
                 <div className="flex items-center gap-2 text-blue-400 text-sm font-semibold">
                   <Shield size={14} />
-                  Step 2 — Enable HTTPS (free via Cloudflare)
+                  Step 2 — HTTPS certificate
                 </div>
-                <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                  To get HTTPS on your custom domain, proxy it through Cloudflare (free plan):
-                </p>
-                <ol className="text-sm text-zinc-600 dark:text-zinc-400 space-y-1.5 list-decimal list-inside">
-                  <li>Add your domain to Cloudflare and update your registrar nameservers</li>
-                  <li>In Cloudflare DNS, add the CNAME above with the proxy enabled (orange cloud)</li>
-                  <li>Under SSL/TLS, set mode to <strong className="text-zinc-300">Full</strong></li>
-                </ol>
-                <a
-                  href="https://developers.cloudflare.com/fundamentals/get-started/setup/add-site/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 mt-1 transition-colors"
-                >
-                  Cloudflare setup guide <ExternalLink size={11} />
-                </a>
+                {sslStatus === "active" ? (
+                  <p className="text-sm text-green-600 flex items-center gap-2">
+                    <CheckCircle size={14} />
+                    Certificate active — HTTPS is live on {domain}
+                  </p>
+                ) : sslStatus === "error" ? (
+                  <p className="text-sm text-red-500 flex items-center gap-2">
+                    <AlertTriangle size={14} />
+                    Certificate issuance failed. Double-check the CNAME above, then re-verify.
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-600 dark:text-zinc-400 flex items-center gap-2">
+                    <Loader2 size={14} className="animate-spin" />
+                    We're automatically issuing a certificate ({sslStatus}) — this can take a few minutes
+                    once the CNAME above resolves. No action needed.
+                  </p>
+                )}
               </div>
+
+              {/* Step C: Purge edge cache on demand */}
+              {sslStatus === "active" && (
+                <div className="space-y-2 rounded-xl border border-zinc-200 dark:border-zinc-700 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <RefreshCw size={14} />
+                    Purge edge cache
+                  </div>
+                  <p className="text-sm text-zinc-500">
+                    Invalidate cached paths immediately instead of waiting on TTL. Comma-separated.
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      value={purgePaths}
+                      onChange={e => setPurgePaths(e.target.value)}
+                      placeholder="/, /about"
+                      className="flex-1 text-sm font-mono border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 rounded-lg outline-none focus:ring-2 focus:ring-black dark:focus:ring-white transition"
+                    />
+                    <Button type="button" onClick={purgeCache} disabled={purging} variant="outline" className="shrink-0">
+                      {purging ? <Loader2 size={14} className="animate-spin mr-1.5" /> : <RefreshCw size={14} className="mr-1.5" />}
+                      Purge
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

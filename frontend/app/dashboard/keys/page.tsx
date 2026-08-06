@@ -8,12 +8,21 @@ import { Input } from "@/components/ui/input";
 import { Key, Plus, Trash2, Copy, CheckCheck, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
+type Scope = "full" | "deploy" | "read";
+
 type ApiKey = {
   id: string;
   name: string;
   prefix: string;
+  scope: Scope;
   createdAt: string;
   lastUsedAt: string | null;
+};
+
+const SCOPE_LABELS: Record<Scope, string> = {
+  full: "Full access",
+  deploy: "Deploy only",
+  read: "Read only",
 };
 
 function formatRelative(dateStr: string) {
@@ -29,6 +38,7 @@ export default function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [newKeyName, setNewKeyName] = useState("");
+  const [newKeyScope, setNewKeyScope] = useState<Scope>("full");
   const [creating, setCreating] = useState(false);
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -51,7 +61,7 @@ export default function ApiKeysPage() {
     if (!newKeyName.trim()) return;
     setCreating(true);
     try {
-      const res = await api.post("/api-keys", { name: newKeyName.trim() });
+      const res = await api.post("/api-keys", { name: newKeyName.trim(), scope: newKeyScope });
       setNewlyCreatedKey(res.data.key);
       setNewKeyName("");
       fetchKeys();
@@ -126,6 +136,15 @@ export default function ApiKeysPage() {
             maxLength={64}
             className="flex-1 rounded-xl"
           />
+          <select
+            value={newKeyScope}
+            onChange={e => setNewKeyScope(e.target.value as Scope)}
+            className="rounded-xl border border-zinc-200 dark:border-zinc-700 bg-transparent px-3 text-sm shrink-0"
+          >
+            <option value="full">Full access</option>
+            <option value="deploy">Deploy only</option>
+            <option value="read">Read only</option>
+          </select>
           <Button
             type="submit"
             disabled={creating || !newKeyName.trim()}
@@ -157,7 +176,12 @@ export default function ApiKeysPage() {
             >
               <Key size={16} className="text-zinc-400 shrink-0" />
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-sm text-zinc-900 dark:text-zinc-100">{key.name}</p>
+                <div className="flex items-center gap-2">
+                  <p className="font-semibold text-sm text-zinc-900 dark:text-zinc-100">{key.name}</p>
+                  <span className="text-[10px] font-medium px-1.5 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 text-zinc-500">
+                    {SCOPE_LABELS[key.scope] ?? key.scope}
+                  </span>
+                </div>
                 <p className="text-xs text-zinc-400 mt-0.5 font-mono">
                   {key.prefix}{"•".repeat(38)}
                 </p>

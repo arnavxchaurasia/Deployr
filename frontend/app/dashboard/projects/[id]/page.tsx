@@ -27,6 +27,9 @@ import {
   HelpCircle,
   CheckCircle2,
   CalendarClock,
+  Flag,
+  Blocks,
+  Users,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -512,6 +515,33 @@ export default function ProjectPage() {
               >
                 <CalendarClock size={14} className="mr-2 text-indigo-500" />
                 Cron jobs
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/flags`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <Flag size={14} className="mr-2 text-indigo-500" />
+                Feature flags
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/integrations`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <Blocks size={14} className="mr-2 text-indigo-500" />
+                Integrations marketplace
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/members`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <Users size={14} className="mr-2 text-indigo-500" />
+                Project access
               </Button>
 
               <div className="h-[1px] bg-zinc-250 dark:bg-white/5 my-2" />

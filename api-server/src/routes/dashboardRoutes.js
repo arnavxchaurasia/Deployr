@@ -183,7 +183,7 @@ router.get('/api-keys', authMiddleware, async (req, res) => {
   try {
     const keys = await prisma.apiKey.findMany({
       where: { userId: req.user.id },
-      select: { id: true, name: true, prefix: true, createdAt: true, lastUsedAt: true },
+      select: { id: true, name: true, prefix: true, scope: true, createdAt: true, lastUsedAt: true },
       orderBy: { createdAt: 'desc' },
     });
     res.json(keys);
@@ -196,13 +196,14 @@ router.get('/api-keys', authMiddleware, async (req, res) => {
 // POST /api-keys
 router.post('/api-keys', authMiddleware, async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, scope } = req.body;
     if (!name || typeof name !== 'string' || name.trim().length === 0) {
       return res.status(400).json({ error: 'Key name is required' });
     }
     if (name.trim().length > 64) {
       return res.status(400).json({ error: 'Key name must be 64 characters or less' });
     }
+    const resolvedScope = ['full', 'deploy', 'read'].includes(scope) ? scope : 'full';
 
     const existing = await prisma.apiKey.count({ where: { userId: req.user.id } });
     if (existing >= 10) {
@@ -219,6 +220,7 @@ router.post('/api-keys', authMiddleware, async (req, res) => {
         name: name.trim(),
         prefix,
         keyHash,
+        scope: resolvedScope,
       },
     });
 
@@ -227,6 +229,7 @@ router.post('/api-keys', authMiddleware, async (req, res) => {
       id: key.id,
       name: key.name,
       prefix: key.prefix,
+      scope: key.scope,
       createdAt: key.createdAt,
       key: rawKey,
     });

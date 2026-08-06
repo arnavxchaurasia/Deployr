@@ -74,6 +74,34 @@ export default function StatusPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [subscribeEmail, setSubscribeEmail] = useState("");
+  const [subscribing, setSubscribing] = useState(false);
+  const [subscribed, setSubscribed] = useState(false);
+  const [subscribeError, setSubscribeError] = useState<string | null>(null);
+
+  async function handleSubscribe(e: React.FormEvent) {
+    e.preventDefault();
+    if (!subscribeEmail.trim()) return;
+    setSubscribing(true);
+    setSubscribeError(null);
+    try {
+      const res = await fetch(`${API}/status/${slug}/subscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: subscribeEmail.trim() }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? "Failed to subscribe");
+      }
+      setSubscribed(true);
+    } catch (err) {
+      setSubscribeError(err instanceof Error ? err.message : "Failed to subscribe");
+    } finally {
+      setSubscribing(false);
+    }
+  }
+
   useEffect(() => {
     if (!slug) return;
 
@@ -457,6 +485,49 @@ export default function StatusPage() {
           background: var(--border);
           border: none;
         }
+
+        /* ── Subscribe form ── */
+        .subscribe-row {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .subscribe-input {
+          flex: 1;
+          min-width: 160px;
+          padding: 9px 12px;
+          border-radius: 8px;
+          border: 1px solid var(--border);
+          background: var(--bg);
+          color: var(--text-primary);
+          font-size: 14px;
+        }
+
+        .subscribe-button {
+          padding: 9px 16px;
+          border-radius: 8px;
+          border: none;
+          background: var(--accent);
+          color: white;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+        }
+
+        .subscribe-button:disabled {
+          opacity: 0.6;
+          cursor: default;
+        }
+
+        .subscribe-msg {
+          font-size: 13px;
+          color: var(--text-muted);
+        }
+
+        .subscribe-msg.error {
+          color: var(--red);
+        }
       `}</style>
 
       <div className="page">
@@ -546,6 +617,32 @@ export default function StatusPage() {
             <div className="card">
               <div className="card-title">Uptime history — last 60 checks</div>
               <UptimeBar checks={data.checks} />
+            </div>
+
+            {/* Incident subscription */}
+            <div className="card">
+              <div className="card-title">Get notified</div>
+              {subscribed ? (
+                <div className="subscribe-msg">You&apos;re subscribed — we&apos;ll email you if this goes down.</div>
+              ) : (
+                <form onSubmit={handleSubscribe} className="subscribe-row">
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@example.com"
+                    value={subscribeEmail}
+                    onChange={(e) => setSubscribeEmail(e.target.value)}
+                    className="subscribe-input"
+                  />
+                  <button type="submit" disabled={subscribing || !subscribeEmail.trim()} className="subscribe-button">
+                    {subscribing ? "Subscribing…" : "Subscribe"}
+                  </button>
+                </form>
+              )}
+              {subscribeError && <div className="subscribe-msg error">{subscribeError}</div>}
+              {!subscribed && !subscribeError && (
+                <div className="subscribe-msg">Email alerts when this service goes down.</div>
+              )}
             </div>
 
             {/* Footer */}

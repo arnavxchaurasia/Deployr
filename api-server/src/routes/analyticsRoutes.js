@@ -1,8 +1,11 @@
 const express = require('express');
 const crypto = require('crypto');
 const { prisma } = require('../../lib/prisma');
+const logger = require('../../lib/logger');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { getDashboardAnalytics, getProjectAnalytics } = require('../services/analyticsService');
+const { projectAccessWhere } = require('../services/projectAccessService');
+const { getProjectUsage } = require('../services/usageService');
 
 const router = express.Router();
 
@@ -70,12 +73,14 @@ router.post("/track", async (req, res) => {
     await prisma.requestLog.createMany({
       data: validEvents.map(e => ({
         projectId: e.projectId,
+        deploymentId: e.deploymentId || null,
         path: e.path || "/",
         status: e.status || 200,
         latencyMs: e.latencyMs || 0,
         cached: Boolean(e.cached),
         country: e.country,
         city: e.city,
+        bytes: e.bytes || 0,
       }))
     });
 
@@ -106,7 +111,7 @@ router.get(
   async (req, res) => {
     try {
       const project = await prisma.project.findFirst({
-        where: { id: req.params.id, userId: req.user.id },
+        where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'MEMBER') },
         select: { id: true },
       });
       if (!project) return res.status(404).json({ error: "Not found" });
@@ -114,10 +119,29 @@ router.get(
       const data = await getProjectAnalytics(project.id);
       res.json({ data });
     } catch (err) {
-      console.error("Project analytics error:", err);
+      logger.error({ err }, "Project analytics error");
       res.status(500).json({ error: "Analytics failed" });
     }
   }
 );
+
+// GET /project/:id/usage — real cost/usage numbers for the current month
+// (build minutes, request count, bandwidth, cache hit rate). See
+// usageService.js for exactly what is and isn't measured.
+router.get("/project/:id/usage", authMiddleware, async (req, res) => {
+  try {
+    const project = await prisma.project.findFirst({
+      where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'MEMBER') },
+      select: { id: true },
+    });
+    if (!project) return res.status(404).json({ error: "Not found" });
+
+    const data = await getProjectUsage(project.id);
+    res.json({ data });
+  } catch (err) {
+    logger.error({ err }, "Project usage error");
+    res.status(500).json({ error: "Failed to fetch usage" });
+  }
+});
 
 module.exports = router;

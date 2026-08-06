@@ -1,8 +1,9 @@
 const { prisma } = require("../../lib/prisma");
+const logger = require("../../lib/logger");
 
 async function processTelemetry(projectId, deploymentId, telemetry) {
   try {
-    console.log(`[Build Checks] Analyzing telemetry for deployment ${deploymentId}...`);
+    logger.info(`[Build Checks] Analyzing telemetry for deployment ${deploymentId}...`);
     
     const { dependencies, devDependencies, totalBuildTimeMs, isNextJs } = telemetry;
     const allDeps = { ...dependencies, ...devDependencies };
@@ -93,11 +94,11 @@ async function processTelemetry(projectId, deploymentId, telemetry) {
       }));
 
       await prisma.deploymentRecommendation.createMany({ data });
-      console.log(`[AI Engine] Saved ${recommendations.length} insights for ${deploymentId}`);
+      logger.info(`[AI Engine] Saved ${recommendations.length} insights for ${deploymentId}`);
     }
 
   } catch (err) {
-    console.error("[AI Engine] Evaluation failed:", err);
+    logger.error({ err }, "[AI Engine] Evaluation failed");
   }
 }
 

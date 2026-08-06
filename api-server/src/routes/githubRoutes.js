@@ -1,11 +1,40 @@
 const express = require('express');
 const crypto = require('crypto');
 const { prisma } = require('../../lib/prisma');
+const logger = require('../../lib/logger');
 const { getIO } = require('../utils/socket');
-const { decrypt, encrypt } = require('../../lib/crypto');
-const { ecsClient, CLUSTER, TASK, SUBNETS, SECURITY_GROUP, LAMBDA_EXECUTION_ROLE_ARN, RunTaskCommand } = require('../services/awsService');
+const { encrypt } = require('../../lib/crypto');
 const { authMiddleware } = require('../middlewares/authMiddleware');
-const { listUserRepos, getPackageJson, detectFramework, detectMonorepo, validateGitHubToken } = require('../services/githubService');
+const { listUserRepos, listInstallationRepos, getPackageJson, detectFramework, detectMonorepo, validateGitHubToken } = require('../services/githubService');
+const { checkBuildQuota } = require('../services/quotaService');
+const { checkBlackout } = require('../services/blackoutService');
+const { triggerECSBuild } = require('../services/deployTriggerService');
+const { cleanupDeployment } = require('../services/deploymentCleanupService');
+const { isConfigured: isGithubAppConfigured, installUrl, resolveGithubToken, resolveGithubAuth } = require('../services/githubAppService');
+const { setCommitStatus } = require('../services/githubService');
+
+// Fallback for projects created before githubOwner/githubRepo were persisted at creation time.
+function resolveGithubOwnerRepo(project) {
+  if (project?.githubOwner && project?.githubRepo) {
+    return { owner: project.githubOwner, repo: project.githubRepo };
+  }
+  const match = project?.gitURL?.match(/github\.com[:/]([^/]+)\/([^/.]+?)(?:\.git)?\/?$/i);
+  return match ? { owner: match[1], repo: match[2] } : { owner: null, repo: null };
+}
+
+// Fire-and-forget commit status update — never blocks the webhook response,
+// and silently no-ops if there's no commit hash or resolvable GitHub auth.
+async function notifyCommitStatus(project, commitHash, state, { targetUrl, description } = {}) {
+  if (!commitHash) return;
+  const { owner, repo } = resolveGithubOwnerRepo(project);
+  if (!owner || !repo || !project.user) return;
+
+  const token = await resolveGithubToken(project.user);
+  if (!token) return;
+
+  setCommitStatus(owner, repo, commitHash, state, { targetUrl, description, context: 'deployr/deploy' }, token)
+    .catch(() => {});
+}
 
 const router = express.Router();
 
@@ -22,92 +51,6 @@ function verifyGithubSignature(req) {
   } catch {
     return false;
   }
-}
-
-function slugifyBranch(branch) {
-  return branch.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-}
-
-async function triggerECSBuild({ project, branch, commitHash, trigger }) {
-  const isPreview = branch !== 'main' && branch !== 'master';
-  let previewSubdomain = null;
-
-  if (isPreview) {
-    const branchSlug = slugifyBranch(branch);
-    previewSubdomain = `${project.slug}-${branchSlug}`.slice(0, 63);
-    // Clear any old deployment that owned this subdomain
-    await prisma.deployment.updateMany({
-      where: { projectId: project.id, previewSubdomain },
-      data: { previewSubdomain: null },
-    });
-  }
-
-  const deployment = await prisma.deployment.create({
-    data: {
-      projectId: project.id,
-      status: 'QUEUED',
-      isActive: false,
-      branch,
-      commitHash: commitHash || null,
-      trigger,
-      startedAt: new Date(),
-      isPreview,
-      previewSubdomain,
-    },
-  });
-
-  const targetEnv = isPreview ? 'preview' : 'production';
-  const userEnvVarsObj = {};
-  for (const e of project.environmentVariables ?? []) {
-    if (e.environment === 'all' || e.environment === targetEnv) {
-      userEnvVarsObj[e.key] = decrypt(e.value);
-    }
-  }
-
-  const command = new RunTaskCommand({
-    cluster: CLUSTER,
-    taskDefinition: TASK,
-    launchType: 'FARGATE',
-    networkConfiguration: {
-      awsvpcConfiguration: {
-        assignPublicIp: 'ENABLED',
-        subnets: SUBNETS,
-        securityGroups: [SECURITY_GROUP],
-      },
-    },
-    overrides: {
-      containerOverrides: [
-        {
-          name: 'builder-image',
-          environment: [
-            { name: 'GIT_REPOSITORY_URL',  value: project.gitURL },
-            { name: 'PROJECT_ID',          value: project.id },
-            { name: 'DEPLOYEMENT_ID',      value: deployment.id },
-            { name: 'BRANCH',              value: branch },
-            { name: 'USER_ENV_VARS',       value: JSON.stringify(userEnvVarsObj) },
-            { name: 'AWS_LAMBDA_ROLE_ARN', value: LAMBDA_EXECUTION_ROLE_ARN },
-            { name: 'BUILD_COMMAND',       value: project.buildCommand   || 'npm run build' },
-            { name: 'OUTPUT_DIR',          value: project.outputDir      || 'dist' },
-            { name: 'INSTALL_COMMAND',     value: project.installCommand || 'npm install' },
-            { name: 'ROOT_DIR',            value: project.rootDir        || '.' },
-          ],
-        },
-      ],
-    },
-  });
-
-  try {
-    const result = await ecsClient.send(command);
-    const taskArn = result.tasks?.[0]?.taskArn;
-    if (taskArn) {
-      await prisma.deployment.update({ where: { id: deployment.id }, data: { taskArn } });
-    }
-  } catch (ecsErr) {
-    console.error('[Webhook] ECS task failed:', ecsErr);
-    await prisma.deployment.update({ where: { id: deployment.id }, data: { status: 'FAILED' } });
-  }
-
-  return deployment;
 }
 
 // ── GitHub token management ──────────────────────────────────────────────────
@@ -139,7 +82,7 @@ router.post('/github/token', authMiddleware, async (req, res) => {
 
     return res.json({ success: true, login });
   } catch (err) {
-    console.error('[GitHub] POST /github/token error:', err);
+    logger.error({ err }, '[GitHub] POST /github/token error');
     return res.status(500).json({ error: 'Failed to save GitHub token' });
   }
 });
@@ -157,9 +100,28 @@ router.delete('/github/token', authMiddleware, async (req, res) => {
 
     return res.json({ success: true });
   } catch (err) {
-    console.error('[GitHub] DELETE /github/token error:', err);
+    logger.error({ err }, '[GitHub] DELETE /github/token error');
     return res.status(500).json({ error: 'Failed to remove GitHub token' });
   }
+});
+
+/**
+ * GET /github/app/status
+ * Whether the GitHub App is available to connect, and whether this user
+ * already has. Frontend uses this to offer "Connect via GitHub App" as an
+ * alternative to pasting a PAT.
+ */
+router.get('/github/app/status', authMiddleware, async (req, res) => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { githubAppInstallationId: true },
+  });
+
+  res.json({
+    available: isGithubAppConfigured(),
+    installed: !!user?.githubAppInstallationId,
+    installUrl: installUrl(),
+  });
 });
 
 /**
@@ -170,19 +132,21 @@ router.get('/github/repos', authMiddleware, async (req, res) => {
   try {
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: { githubToken: true },
+      select: { githubToken: true, githubAppInstallationId: true },
     });
 
-    if (!user || !user.githubToken) {
-      return res.status(400).json({ error: 'No GitHub token configured' });
+    const auth = await resolveGithubAuth(user);
+    if (!auth) {
+      return res.status(400).json({ error: 'No GitHub token or App installation configured' });
     }
 
-    const decryptedToken = decrypt(user.githubToken);
-    const repos = await listUserRepos(decryptedToken);
+    const repos = auth.isAppInstallation
+      ? await listInstallationRepos(auth.token)
+      : await listUserRepos(auth.token);
 
     return res.json({ repos });
   } catch (err) {
-    console.error('[GitHub] GET /github/repos error:', err);
+    logger.error({ err }, '[GitHub] GET /github/repos error');
     return res.status(500).json({ error: 'Failed to fetch repositories' });
   }
 });
@@ -202,14 +166,14 @@ router.get('/github/detect', authMiddleware, async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: req.user.id },
-      select: { githubToken: true },
+      select: { githubToken: true, githubAppInstallationId: true },
     });
 
-    if (!user || !user.githubToken) {
-      return res.status(400).json({ error: 'No GitHub token configured' });
+    const decryptedToken = await resolveGithubToken(user);
+    if (!decryptedToken) {
+      return res.status(400).json({ error: 'No GitHub token or App installation configured' });
     }
 
-    const decryptedToken = decrypt(user.githubToken);
     const resolvedBranch = branch || 'main';
 
     const [pkg, monorepo] = await Promise.all([
@@ -225,7 +189,7 @@ router.get('/github/detect', authMiddleware, async (req, res) => {
 
     return res.json({ detected: true, framework, buildCommand, outputDir, installCommand, isMonorepo: monorepo.isMonorepo, monoRepoType: monorepo.type });
   } catch (err) {
-    console.error('[GitHub] GET /github/detect error:', err);
+    logger.error({ err }, '[GitHub] GET /github/detect error');
     return res.status(500).json({ error: 'Failed to detect framework' });
   }
 });
@@ -239,15 +203,43 @@ router.post("/webhook", async (req, res) => {
     }
 
     const payload = req.body;
+
+    // ── GitHub App installation events (account-level, no `repository`) ──────
+    if (payload.installation && ['created', 'deleted', 'new_permissions_accepted'].includes(payload.action)) {
+      const installationId = payload.installation.id;
+      const accountLogin = payload.installation.account?.login;
+
+      if (payload.action === 'deleted') {
+        await prisma.user.updateMany({
+          where: { githubAppInstallationId: installationId },
+          data: { githubAppInstallationId: null },
+        });
+        logger.info(`[GitHub App] Installation ${installationId} removed`);
+      } else if (accountLogin) {
+        const updated = await prisma.user.updateMany({
+          where: { githubUsername: { equals: accountLogin, mode: 'insensitive' } },
+          data: { githubAppInstallationId: installationId },
+        });
+        logger.info(`[GitHub App] Installation ${installationId} linked to ${updated.count} user(s) matching "${accountLogin}"`);
+      }
+
+      return res.sendStatus(200);
+    }
+
     const repoUrl = payload.repository?.html_url;
     if (!repoUrl) return res.sendStatus(200);
 
-    const project = await prisma.project.findFirst({
+    // A monorepo can back multiple Deployr projects (same gitURL, different
+    // rootDir/build config per app) — deploy all of them, not just the first.
+    const projects = await prisma.project.findMany({
       where: { gitURL: repoUrl },
-      include: { environmentVariables: true },
+      include: {
+        environmentVariables: true,
+        user: { select: { githubToken: true, githubAppInstallationId: true } },
+      },
     });
 
-    if (!project) return res.sendStatus(200);
+    if (projects.length === 0) return res.sendStatus(200);
 
     // ── PUSH event — deploy all branches (main → production, others → preview) ─
     if (payload.ref) {
@@ -257,31 +249,49 @@ router.post("/webhook", async (req, res) => {
 
       // Validate branch name to prevent shell injection
       if (!/^[a-zA-Z0-9._\-/]+$/.test(branch)) {
-        console.warn(`[Webhook Push] Rejecting invalid branch: ${branch}`);
+        logger.warn(`[Webhook Push] Rejecting invalid branch: ${branch}`);
         return res.sendStatus(200);
       }
 
-      // For the default branch, avoid stacking production builds
-      if (isDefaultBranch) {
-        const inFlight = await prisma.deployment.findFirst({
-          where: { projectId: project.id, status: { in: ['QUEUED', 'BUILDING'] }, isPreview: false },
-        });
-        if (inFlight) {
-          console.log(`[Webhook] Push skipped — production build already in progress for ${project.name}`);
-          return res.sendStatus(200);
+      for (const project of projects) {
+        // For the default branch, avoid stacking production builds
+        if (isDefaultBranch) {
+          const inFlight = await prisma.deployment.findFirst({
+            where: { projectId: project.id, status: { in: ['QUEUED', 'BUILDING'] }, isPreview: false },
+          });
+          if (inFlight) {
+            logger.info(`[Webhook] Push skipped — production build already in progress for ${project.name}`);
+            continue;
+          }
         }
-      }
 
-      await triggerECSBuild({ project, branch, commitHash, trigger: 'GH_PUSH' });
-      console.log(`[Webhook] Push → ${isDefaultBranch ? 'production' : 'preview'} deploy triggered for ${project.name} (${branch})`);
+        const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+        if (!quota.allowed) {
+          logger.info(`[Webhook] Push skipped — build-minute quota exceeded for ${project.name} (${quota.used.toFixed(1)}/${quota.limit} min)`);
+          continue;
+        }
 
-      // Emit socket event so the dashboard can show the new preview deployment immediately
-      if (!isDefaultBranch) {
-        getIO().to(`user:${project.userId}`).emit("github_branch_deployed", {
-          projectId: project.id,
-          projectName: project.name,
-          branch,
+        const blackout = checkBlackout(project);
+        if (blackout.blocked) {
+          logger.info(`[Webhook] Push skipped — blackout window active for ${project.name}`);
+          continue;
+        }
+
+        const pushDeployment = await triggerECSBuild({ project, branch, commitHash, trigger: 'GH_PUSH' });
+        logger.info(`[Webhook] Push → ${isDefaultBranch ? 'production' : 'preview'} deploy triggered for ${project.name} (${branch})`);
+        notifyCommitStatus(project, commitHash, 'pending', {
+          targetUrl: `${FRONTEND_URL}/dashboard/logs/${pushDeployment.id}`,
+          description: 'Deployr build in progress',
         });
+
+        // Emit socket event so the dashboard can show the new preview deployment immediately
+        if (!isDefaultBranch) {
+          getIO().to(`user:${project.userId}`).emit("github_branch_deployed", {
+            projectId: project.id,
+            projectName: project.name,
+            branch,
+          });
+        }
       }
 
       return res.sendStatus(200);
@@ -294,29 +304,71 @@ router.post("/webhook", async (req, res) => {
 
       const branch = pr.head.ref;
       if (!/^[a-zA-Z0-9._\-/]+$/.test(branch)) {
-        console.warn(`[Webhook PR] Rejecting invalid branch: ${branch}`);
+        logger.warn(`[Webhook PR] Rejecting invalid branch: ${branch}`);
         return res.sendStatus(200);
       }
 
-      const deployment = await triggerECSBuild({
-        project,
-        branch,
-        commitHash: pr.head.sha,
-        trigger: 'WEBHOOK',
-      });
+      for (const project of projects) {
+        const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+        if (!quota.allowed) {
+          logger.info(`[Webhook PR] Skipped — build-minute quota exceeded for ${project.name} (${quota.used.toFixed(1)}/${quota.limit} min)`);
+          continue;
+        }
 
-      console.log(
-        `[Webhook PR] Preview deploy triggered for ${project.name} ` +
-        `(branch: ${branch}, deployment: ${deployment.id})\n` +
-        `  Track: ${FRONTEND_URL}/dashboard/projects/${project.id}/deployments`
-      );
+        const blackout = checkBlackout(project);
+        if (blackout.blocked) {
+          logger.info(`[Webhook PR] Skipped — blackout window active for ${project.name}`);
+          continue;
+        }
+
+        const deployment = await triggerECSBuild({
+          project,
+          branch,
+          commitHash: pr.head.sha,
+          trigger: 'WEBHOOK',
+          prNumber: pr.number,
+        });
+
+        logger.info(
+          `[Webhook PR] Preview deploy triggered for ${project.name} ` +
+          `(branch: ${branch}, deployment: ${deployment.id})\n` +
+          `  Track: ${FRONTEND_URL}/dashboard/projects/${project.id}/deployments`
+        );
+
+        notifyCommitStatus(project, pr.head.sha, 'pending', {
+          targetUrl: `${FRONTEND_URL}/dashboard/logs/${deployment.id}`,
+          description: 'Deployr build in progress',
+        });
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // ── PULL REQUEST closed/merged — tear down its preview deployment(s) ─────
+    if (payload.action === "closed") {
+      const pr = payload.pull_request;
+      if (!pr) return res.sendStatus(200);
+
+      for (const project of projects) {
+        const previews = await prisma.deployment.findMany({
+          where: { projectId: project.id, prNumber: pr.number, isPreview: true },
+        });
+        for (const preview of previews) {
+          try {
+            await cleanupDeployment(preview);
+            logger.info(`[Webhook PR] Preview deployment cleaned up for ${project.name} (PR #${pr.number})`);
+          } catch (err) {
+            logger.error({ err }, `[Webhook PR] Preview cleanup failed for ${preview.id}`);
+          }
+        }
+      }
 
       return res.sendStatus(200);
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err);
+    logger.error({ err }, "Webhook error");
     res.status(500).json({ error: "Webhook failed" });
   }
 });

@@ -1,4 +1,5 @@
 const nodemailer = require("nodemailer");
+const logger = require("../../lib/logger");
 
 function escapeHtml(str) {
   return String(str)
@@ -27,7 +28,7 @@ async function getTransporter() {
     });
   } else {
     // Fallback to Ethereal Email for local development
-    console.log("No SMTP credentials found in .env. Falling back to Ethereal Email...");
+    logger.info("No SMTP credentials found in .env. Falling back to Ethereal Email...");
     const testAccount = await nodemailer.createTestAccount();
     transporter = nodemailer.createTransport({
       host: "smtp.ethereal.email",
@@ -100,11 +101,11 @@ async function sendEmail({ to, subject, html }) {
     html,
   });
 
-  console.log(`[Email] Sent to ${to}: ${subject}`);
+  logger.info(`[Email] Sent to ${to}: ${subject}`);
   
   // If using Ethereal, print the preview URL
   if (info.messageId && nodemailer.getTestMessageUrl(info)) {
-    console.log(`📧 Ethereal Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
+    logger.info(`Ethereal Preview URL: ${nodemailer.getTestMessageUrl(info)}`);
   }
   
   return info;
@@ -272,9 +273,31 @@ async function sendInvitationEmail(email, orgName, inviteUrl) {
   });
 }
 
+async function sendIncidentEmail(email, { projectName, statusPageUrl, unsubscribeUrl }) {
+  const safeName = escapeHtml(projectName);
+  const content = `
+    <h1>${safeName} appears to be down</h1>
+    <p>Our monitor detected that ${safeName} stopped responding successfully. We'll keep checking every minute.</p>
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${statusPageUrl}" class="button">View Status Page</a>
+    </div>
+    <p style="font-size: 13px; color: #a3a3a3;">
+      You're receiving this because you subscribed to incident updates for ${safeName}.
+      <a href="${unsubscribeUrl}">Unsubscribe</a>.
+    </p>
+  `;
+
+  await sendEmail({
+    to: email,
+    subject: `⚠ ${projectName} is down`,
+    html: wrapHtml('Incident Alert', `${projectName} appears to be down.`, content),
+  });
+}
+
 module.exports = {
   sendOTPEmail,
   sendPasswordResetEmail,
+  sendIncidentEmail,
   sendDeploymentSuccessEmail,
   sendDeploymentFailureEmail,
   sendPaymentSuccessEmail,

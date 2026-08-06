@@ -1,10 +1,29 @@
 const express = require('express');
 const crypto = require('crypto');
+const Razorpay = require('razorpay');
 const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { sendInvitationEmail } = require('../services/mailService');
+const { getOrgUsage } = require('../services/usageService');
+const { sendOrgWebhook } = require('../services/orgWebhookService');
 
 const router = express.Router();
+
+// Seat-based team billing — ₹500/seat/month, priced off the team's current
+// member count at time of upgrade. There's no recurring subscription/webhook
+// wired up yet, so growing the team past seatsPurchased needs re-running
+// checkout (see the seatsExceeded flag on GET /orgs/:id/billing) rather than
+// being billed automatically — that would need Razorpay Subscriptions, a
+// separate integration from the one-off orders used here and elsewhere in
+// this codebase.
+const PRICE_PER_SEAT_PAISE = 50000; // ₹500
+
+const getRazorpayInstance = () => {
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_SECRET) {
+    throw new Error('Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_SECRET.');
+  }
+  return new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID, key_secret: process.env.RAZORPAY_SECRET });
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -157,8 +176,18 @@ router.post('/orgs/:id/invite', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'role must be MEMBER or ADMIN' });
     }
 
-    const org = await prisma.organization.findUnique({ where: { id: req.params.id } });
+    const org = await prisma.organization.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, plan: true, name: true, _count: { select: { memberships: true } } },
+    });
     if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+    const FREE_TIER_MEMBER_LIMIT = 3;
+    if (org.plan === 'FREE' && org._count.memberships >= FREE_TIER_MEMBER_LIMIT) {
+      return res.status(402).json({
+        error: `Free teams are limited to ${FREE_TIER_MEMBER_LIMIT} members. Upgrade to invite more.`,
+      });
+    }
 
     // Check if the email belongs to an existing member
     const existingUser = await prisma.user.findUnique({
@@ -254,6 +283,12 @@ router.post('/invitations/:token/accept', authMiddleware, async (req, res) => {
       prisma.invitation.delete({ where: { id: invitation.id } }),
     ]);
 
+    sendOrgWebhook(invitation.orgId, 'member.joined', {
+      userId: req.user.id,
+      email: invitation.email,
+      role: invitation.role,
+    }).catch(() => {});
+
     res.json({ success: true, orgId: invitation.orgId });
   } catch (err) {
     console.error('Accept invitation error:', err);
@@ -284,6 +319,12 @@ router.delete('/orgs/:id/members/:userId', authMiddleware, async (req, res) => {
     await prisma.organizationMembership.delete({
       where: { orgId_userId: { orgId: req.params.id, userId: req.params.userId } },
     });
+
+    sendOrgWebhook(req.params.id, 'member.left', {
+      userId: req.params.userId,
+      removedBy: req.user.id,
+      wasSelf: req.user.id === req.params.userId,
+    }).catch(() => {});
 
     res.json({ success: true });
   } catch (err) {
@@ -352,6 +393,219 @@ router.get('/orgs/:id/projects', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('List org projects error:', err);
     res.status(500).json({ error: 'Failed to list projects' });
+  }
+});
+
+// ── GET /orgs/:id/billing — current plan/seat status ─────────────────────────
+
+router.get('/orgs/:id/billing', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireMembership(req.params.id, req.user.id);
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const org = await prisma.organization.findUnique({
+      where: { id: req.params.id },
+      select: { plan: true, seatsPurchased: true, _count: { select: { memberships: true } } },
+    });
+    if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+    const memberCount = org._count.memberships;
+
+    res.json({
+      plan: org.plan,
+      memberCount,
+      seatsPurchased: org.seatsPurchased,
+      seatsExceeded: org.plan !== 'FREE' && memberCount > org.seatsPurchased,
+      pricePerSeat: PRICE_PER_SEAT_PAISE / 100,
+      freeTierMemberLimit: 3,
+    });
+  } catch (err) {
+    console.error('Get org billing error:', err);
+    res.status(500).json({ error: 'Failed to fetch billing info' });
+  }
+});
+
+// GET /orgs/:id/usage — real cost/usage numbers for the current month,
+// summed across every project in the org (see usageService.js).
+router.get('/orgs/:id/usage', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireMembership(req.params.id, req.user.id);
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const data = await getOrgUsage(req.params.id);
+    res.json({ data });
+  } catch (err) {
+    console.error('Get org usage error:', err);
+    res.status(500).json({ error: 'Failed to fetch usage' });
+  }
+});
+
+// ── Audit log export (compliance/SIEM) ────────────────────────────────────────
+
+router.get('/orgs/:id/audit-export', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const org = await prisma.organization.findUnique({
+    where: { id: req.params.id },
+    select: { auditExportWebhookUrl: true },
+  });
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+  res.json({ enabled: !!org.auditExportWebhookUrl, webhookUrl: org.auditExportWebhookUrl });
+});
+
+router.post('/orgs/:id/audit-export', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const { webhookUrl } = req.body;
+    if (!webhookUrl || typeof webhookUrl !== 'string') {
+      return res.status(400).json({ error: 'webhookUrl is required' });
+    }
+    try { new URL(webhookUrl); } catch { return res.status(400).json({ error: 'webhookUrl must be a valid URL' }); }
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: { auditExportWebhookUrl: webhookUrl },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Set audit export webhook error:', err);
+    res.status(500).json({ error: 'Failed to save audit export webhook' });
+  }
+});
+
+router.delete('/orgs/:id/audit-export', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  await prisma.organization.update({
+    where: { id: req.params.id },
+    data: { auditExportWebhookUrl: null },
+  });
+
+  res.json({ success: true });
+});
+
+// ── Org lifecycle webhook (member joined/left, project transferred, plan changed) ─
+
+router.get('/orgs/:id/webhook', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const org = await prisma.organization.findUnique({
+    where: { id: req.params.id },
+    select: { webhookUrl: true },
+  });
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+  res.json({ enabled: !!org.webhookUrl, webhookUrl: org.webhookUrl });
+});
+
+router.post('/orgs/:id/webhook', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const { webhookUrl } = req.body;
+    if (!webhookUrl || typeof webhookUrl !== 'string') {
+      return res.status(400).json({ error: 'webhookUrl is required' });
+    }
+    try { new URL(webhookUrl); } catch { return res.status(400).json({ error: 'webhookUrl must be a valid URL' }); }
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: { webhookUrl },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Set org webhook error:', err);
+    res.status(500).json({ error: 'Failed to save org webhook' });
+  }
+});
+
+router.delete('/orgs/:id/webhook', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  await prisma.organization.update({
+    where: { id: req.params.id },
+    data: { webhookUrl: null },
+  });
+
+  res.json({ success: true });
+});
+
+// ── POST /orgs/:id/billing/create-order — buy seats for the current team size ─
+
+router.post('/orgs/:id/billing/create-order', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER');
+    if (!membership) return res.status(403).json({ error: 'Forbidden: only owners can manage billing' });
+
+    const memberCount = await prisma.organizationMembership.count({ where: { orgId: req.params.id } });
+    const seats = Math.max(memberCount, 1);
+    const amountInPaise = seats * PRICE_PER_SEAT_PAISE;
+
+    const rzp = getRazorpayInstance();
+    const order = await rzp.orders.create({
+      amount: amountInPaise,
+      currency: 'INR',
+      receipt: `org_${Date.now()}_${req.params.id.slice(0, 8)}`,
+    });
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: { razorpayOrderId: order.id },
+    });
+
+    res.json({ success: true, orderId: order.id, amount: amountInPaise, seats, keyId: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error('Org billing order error:', err);
+    res.status(500).json({ error: 'Failed to create payment order' });
+  }
+});
+
+// ── POST /orgs/:id/billing/verify — confirm payment, upgrade to PRO ───────────
+
+router.post('/orgs/:id/billing/verify', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER');
+    if (!membership) return res.status(403).json({ error: 'Forbidden: only owners can manage billing' });
+
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    const secret = process.env.RAZORPAY_SECRET;
+    if (!secret) return res.status(500).json({ error: 'Payment verification is not configured' });
+
+    const shasum = crypto.createHmac('sha256', secret);
+    shasum.update(`${razorpay_order_id}|${razorpay_payment_id}`);
+    const digest = shasum.digest('hex');
+
+    if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(razorpay_signature))) {
+      return res.status(400).json({ error: 'Transaction not legit!' });
+    }
+
+    const memberCount = await prisma.organizationMembership.count({ where: { orgId: req.params.id } });
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: { plan: 'PRO', seatsPurchased: memberCount },
+    });
+
+    sendOrgWebhook(req.params.id, 'plan.changed', {
+      plan: 'PRO',
+      seatsPurchased: memberCount,
+      changedBy: req.user.id,
+    }).catch(() => {});
+
+    res.json({ success: true, seatsPurchased: memberCount });
+  } catch (err) {
+    console.error('Org billing verify error:', err);
+    res.status(500).json({ error: 'Failed to verify payment' });
   }
 });
 

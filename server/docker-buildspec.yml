@@ -1,0 +1,45 @@
+# Starting template for the AWS CodeBuild project that custom Dockerfile
+# builds dispatch to (see api-server/src/services/codeBuildService.js).
+#
+# CodeBuild receives the same environment variables as the normal ECS
+# Fargate builder (GIT_REPOSITORY_URL, PROJECT_ID, DEPLOYEMENT_ID,
+# USER_ENV_VARS, BRANCH, etc. — see deployTriggerService.js). This buildspec
+# needs privileged mode enabled on the CodeBuild project (Environment ->
+# Privileged: true) so `docker build` works.
+#
+# What this template does NOT do yet, and what you'll need to fill in for
+# your own setup: publish build logs to the same Kafka topic the ECS builder
+# uses (so they show up in the dashboard's live log stream), and upload the
+# built output to S3 in the same __outputs/{PROJECT_ID}/{DEPLOYEMENT_ID}/
+# layout server/script.js uses. Wire those up the same way script.js does
+# (see publishLog/uploadToS3 there) — this file only handles the actual
+# `docker build` + `docker run` steps, which is the part that specifically
+# needs CodeBuild instead of Fargate.
+
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Cloning $GIT_REPOSITORY_URL ($BRANCH)..."
+      - git clone --branch "$BRANCH" "$GIT_REPOSITORY_URL" ./repo
+
+  build:
+    commands:
+      - cd repo
+      - |
+        if [ ! -f Dockerfile ]; then
+          echo "No Dockerfile found at repo root — useDockerfile is enabled for this project but no Dockerfile exists."
+          exit 1
+        fi
+      - docker build -t deployr-build:$DEPLOYEMENT_ID .
+      # Run the built image to produce output, mounting a volume you then
+      # upload to S3. Adjust the container's expected output path and the
+      # env vars passed through to match your own Dockerfile's contract.
+      - mkdir -p /tmp/output
+      - docker run --rm -v /tmp/output:/output --env-file <(echo "$USER_ENV_VARS" | python3 -c "import json,sys; [print(f'{k}={v}') for k,v in json.load(sys.stdin).items()]") deployr-build:$DEPLOYEMENT_ID
+
+  post_build:
+    commands:
+      - echo "Upload /tmp/output to s3://<your-bucket>/__outputs/$PROJECT_ID/$DEPLOYEMENT_ID/ here"
+      - echo "Build finished"

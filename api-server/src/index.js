@@ -20,6 +20,9 @@ const { initKafkaConsumer } = require("./services/kafkaService");
 const socketUtil = require("./utils/socket");
 const { startBuildTimeoutJob } = require("./jobs/buildTimeoutJob");
 const { startUptimeMonitorJob } = require("./jobs/uptimeMonitorJob");
+const { startCanaryHealthJob } = require("./jobs/canaryHealthJob");
+const { startArtifactRetentionJob } = require("./jobs/artifactRetentionJob");
+const { startFailoverJob } = require("./jobs/failoverJob");
 const { prisma } = require("../lib/prisma");
 
 const logger = (() => {
@@ -76,6 +79,9 @@ initKafkaConsumer(io).catch(err => {
 // ── Background jobs ───────────────────────────────────────────────────────────
 startBuildTimeoutJob();
 startUptimeMonitorJob();
+startCanaryHealthJob();
+startArtifactRetentionJob();
+startFailoverJob();
 
 const { startCronExecutor } = require('./services/cronExecutor');
 startCronExecutor();

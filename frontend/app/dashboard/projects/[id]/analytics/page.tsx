@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { ArrowLeft, Activity, Globe, MousePointerClick, Zap, Timer } from "lucide-react";
+import { ArrowLeft, Activity, Globe, MousePointerClick, Zap, Timer, Gauge, HardDrive, Hammer } from "lucide-react";
 import {
   AreaChart,
   Area,
@@ -26,12 +26,32 @@ type TrafficData = {
   avgLcp: number | null;
 };
 
+type UsageData = {
+  buildMinutes: number;
+  totalRequests: number;
+  bandwidthBytes: number;
+  cacheHitRate: number;
+};
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(1)} ${units[i]}`;
+}
+
 export default function AnalyticsPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
 
   const [data, setData] = useState<TrafficData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [usage, setUsage] = useState<UsageData | null>(null);
 
   const fetchTraffic = useCallback(async () => {
     try {
@@ -46,7 +66,8 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     fetchTraffic();
-  }, [fetchTraffic]);
+    api.get(`/project/${id}/usage`).then(res => setUsage(res.data.data)).catch(() => {});
+  }, [fetchTraffic, id]);
 
   if (loading) return <div className="p-10">Loading advanced analytics...</div>;
   if (!data) return <div className="p-10 text-red-500">Failed to load analytics</div>;
@@ -113,6 +134,39 @@ export default function AnalyticsPage() {
           )}
         </Card>
       </div>
+
+      {/* Usage this month */}
+      {usage && (
+        <Card className="p-6 border-zinc-200 dark:border-zinc-800">
+          <h2 className="text-lg font-semibold mb-1">Usage this month</h2>
+          <p className="text-xs text-zinc-500 mb-6">
+            Build minutes, requests, and bandwidth actually recorded — not an estimate.
+          </p>
+          <div className="grid sm:grid-cols-3 gap-6">
+            <div className="flex items-center gap-3">
+              <Hammer className="text-indigo-500 shrink-0" size={20} />
+              <div>
+                <p className="text-2xl font-bold">{usage.buildMinutes.toLocaleString()}</p>
+                <p className="text-xs text-zinc-500">build minutes</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <Gauge className="text-blue-500 shrink-0" size={20} />
+              <div>
+                <p className="text-2xl font-bold">{usage.totalRequests.toLocaleString()}</p>
+                <p className="text-xs text-zinc-500">requests</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <HardDrive className="text-emerald-500 shrink-0" size={20} />
+              <div>
+                <p className="text-2xl font-bold">{formatBytes(usage.bandwidthBytes)}</p>
+                <p className="text-xs text-zinc-500">bandwidth served</p>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {/* Chart */}
       <Card className="p-6 border-zinc-200 dark:border-zinc-800">

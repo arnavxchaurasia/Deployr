@@ -6,14 +6,15 @@
   "author": "",
   "type": "commonjs",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "@prisma/client": "^7.3.0",
     "axios": "^1.13.3",
-    "devcert": "^1.2.3",
     "express": "^5.2.1",
     "http-proxy": "^1.18.1"
   }

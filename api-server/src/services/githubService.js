@@ -98,6 +98,40 @@ async function listUserRepos(githubToken) {
 }
 
 /**
+ * Fetch repositories accessible to a GitHub App installation.
+ * Calls GET /installation/repositories (requires an installation token,
+ * not a personal access token — see resolveGithubAuth in githubAppService).
+ *
+ * @param {string} installationToken
+ * @returns {Promise<Array>} Returns empty array on failure.
+ */
+async function listInstallationRepos(installationToken) {
+  try {
+    const { statusCode, data } = await githubRequest(
+      '/installation/repositories?per_page=100',
+      { headers: { Authorization: `Bearer ${installationToken}` } }
+    );
+
+    if (statusCode !== 200 || !Array.isArray(data?.repositories)) {
+      return [];
+    }
+
+    return data.repositories.map((repo) => ({
+      id: repo.id,
+      name: repo.name,
+      full_name: repo.full_name,
+      private: repo.private,
+      default_branch: repo.default_branch,
+      html_url: repo.html_url,
+      description: repo.description || null,
+      updated_at: repo.updated_at,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Fetch and decode the raw package.json from a GitHub repository.
  * Calls GET /repos/{owner}/{repo}/contents/package.json?ref={branch}
  *
@@ -315,6 +349,84 @@ async function postPRComment(owner, repo, prNumber, body, githubToken) {
 }
 
 /**
+ * Create or update a Deployr status comment on a GitHub Pull Request.
+ * Finds an existing comment containing the hidden marker and edits it in
+ * place; otherwise creates a new one. Keeps long-lived PRs from being
+ * spammed with a fresh comment on every push.
+ *
+ * @param {string} owner
+ * @param {string} repo
+ * @param {number} prNumber
+ * @param {string} body - Markdown comment body (marker is appended automatically)
+ * @param {string} githubToken
+ * @returns {Promise<boolean>} true on success, false on failure (never throws)
+ */
+async function upsertPRComment(owner, repo, prNumber, body, githubToken) {
+  const MARKER = '<!-- deployr-status-comment -->';
+  const fullBody = `${body}\n\n${MARKER}`;
+
+  try {
+    const listPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${prNumber}/comments?per_page=100`;
+    const { statusCode: listStatus, data: comments } = await githubRequest(listPath, {
+      headers: { Authorization: `token ${githubToken}` },
+    });
+
+    const existing = listStatus === 200 && Array.isArray(comments)
+      ? comments.find((c) => typeof c.body === 'string' && c.body.includes(MARKER))
+      : null;
+
+    if (existing) {
+      const patchPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/comments/${existing.id}`;
+      const { statusCode } = await githubRequest(
+        patchPath,
+        { method: 'PATCH', headers: { Authorization: `token ${githubToken}` } },
+        JSON.stringify({ body: fullBody })
+      );
+      return statusCode === 200;
+    }
+
+    return postPRComment(owner, repo, prNumber, fullBody, githubToken);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Set a commit status (shows up in the PR's checks list / commit view —
+ * distinct from a PR comment, and something teams commonly gate merges on).
+ * Calls POST /repos/{owner}/{repo}/statuses/{sha}
+ *
+ * @param {string} owner
+ * @param {string} repo
+ * @param {string} sha - commit SHA
+ * @param {'pending'|'success'|'failure'|'error'} state
+ * @param {{ targetUrl?: string, description?: string, context?: string }} opts
+ * @param {string} githubToken
+ * @returns {Promise<boolean>} true on success, false on failure (never throws)
+ */
+async function setCommitStatus(owner, repo, sha, state, opts = {}, githubToken) {
+  try {
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/statuses/${sha}`;
+    const payload = JSON.stringify({
+      state,
+      target_url: opts.targetUrl,
+      description: opts.description,
+      context: opts.context || 'deployr/deploy',
+    });
+
+    const { statusCode } = await githubRequest(
+      path,
+      { method: 'POST', headers: { Authorization: `token ${githubToken}` } },
+      payload
+    );
+
+    return statusCode === 201;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Validate a GitHub Personal Access Token by calling GET /user.
  *
  * @param {string} token - GitHub PAT to validate
@@ -340,10 +452,13 @@ async function validateGitHubToken(token) {
 
 module.exports = {
   listUserRepos,
+  listInstallationRepos,
   getPackageJson,
   detectFramework,
   getFileContent,
   detectMonorepo,
   postPRComment,
+  upsertPRComment,
+  setCommitStatus,
   validateGitHubToken,
 };
