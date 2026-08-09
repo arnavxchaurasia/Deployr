@@ -3,7 +3,17 @@ export default {
     const url = new URL(request.url);
     const host = url.hostname.toLowerCase();
     const startTime = Date.now();
-    
+
+    // WebSocket upgrades get their own path, bypassing cache/telemetry/
+    // header-rewriting entirely — every wrapper below (withMeta, stripMeta)
+    // reconstructs the Response via `new Response(response.body, {...})`,
+    // which silently drops the special `webSocket` pair a 101 response
+    // carries. There's nothing to cache or track latency for on a
+    // long-lived connection anyway.
+    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      return handleWebSocketProxy(request, env, host, url);
+    }
+
     // Bypass cache for POST/PUT/DELETE
     if (request.method !== "GET" && request.method !== "HEAD") {
       const response = await handleDynamic(request, env, ctx, host, url);
@@ -97,6 +107,40 @@ async function trackTelemetry(request, env, response, cached, latencyMs) {
   }
 }
 
+// Proxies a WebSocket upgrade straight through to the resolved deployment's
+// function origin. Requires the origin itself to support persistent
+// connections — a plain AWS Lambda Function URL request/response backend
+// won't hold a WebSocket open, this just gets the tunnel to the origin;
+// whether the origin can sustain it is the operator's infrastructure choice,
+// same caveat as custom Docker builds needing their own CodeBuild setup.
+async function handleWebSocketProxy(request, env, host, url) {
+  try {
+    const resolveRes = await fetch(`${env.API_BASE}/resolve/${host}`);
+    if (!resolveRes.ok) return new Response('Project not found or not deployed', { status: 404 });
+
+    const { functionUrl, functionUrls, maintenance } = await resolveRes.json();
+    if (maintenance) return new Response('Service unavailable', { status: 503 });
+
+    let targetBase = functionUrl;
+    let subPath = url.pathname;
+    if (functionUrls && url.pathname.startsWith('/api/')) {
+      const rest = url.pathname.slice('/api/'.length);
+      const fnName = rest.split('/')[0];
+      if (functionUrls[fnName]) {
+        targetBase = functionUrls[fnName];
+        subPath = rest.slice(fnName.length);
+      }
+    }
+
+    if (!targetBase) return new Response('This deployment has no server to upgrade a WebSocket connection to', { status: 501 });
+
+    const targetUrl = `${targetBase.replace(/\/$/, '')}${subPath}${url.search}`;
+    return await fetch(targetUrl, request);
+  } catch (err) {
+    return new Response('WebSocket proxy failed: ' + err.message, { status: 502 });
+  }
+}
+
 async function handleDynamic(request, env, ctx, host, url) {
   const API_BASE = env.API_BASE;
   const S3_BASE = "https://vercel-clone-ws.s3.us-east-1.amazonaws.com/__outputs";
@@ -129,7 +173,8 @@ async function handleDynamic(request, env, ctx, host, url) {
     resolved = await resolveRes.json();
     const {
       projectId, deploymentId, functionUrl, functionUrls, protected: isProtected, maintenance, message,
-      custom404Html, custom500Html, redirectRules, headerRules, geoRules, rateLimitPerMinute,
+      custom404Html, custom500Html, redirectRules, headerRules, geoRules, rateLimitPerMinute, botProtection, compressionMode,
+      experiments,
     } = resolved;
 
     if (maintenance) {
@@ -146,6 +191,11 @@ async function handleDynamic(request, env, ctx, host, url) {
       }
     }
 
+    // --- BOT PROTECTION (heuristic — see Project.botProtection schema comment) ---
+    if (botProtection?.mode === 'block' && isLikelyBot(request, botProtection)) {
+      return withMeta(botBlockedPage(), projectId, deploymentId);
+    }
+
     // --- RATE LIMIT (best-effort, per-colo — see rateLimitPerMinute schema comment) ---
     if (rateLimitPerMinute) {
       const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -159,6 +209,11 @@ async function handleDynamic(request, env, ctx, host, url) {
     }
 
     let path = url.pathname;
+
+    // --- IMAGE RESIZING ---
+    if (path === IMAGE_RESIZE_PATH) {
+      return withMeta(await handleImageResize(request, url, projectId, deploymentId, S3_BASE), projectId, deploymentId);
+    }
 
     // --- REDIRECTS & REWRITES ---
     if (Array.isArray(redirectRules) && redirectRules.length) {
@@ -175,7 +230,17 @@ async function handleDynamic(request, env, ctx, host, url) {
       }
     }
 
-    const applyHeaders = (response) => applyHeaderRules(response, path, headerRules);
+    // --- A/B TESTING ---
+    // Assign (or read) a persistent per-visitor variant for each active
+    // experiment, optionally rewrite `path` per variant, and fire
+    // exposure/conversion beacons — see runExperiments() for the full
+    // mechanics. No app code required for path-rewrite-based tests.
+    const { newCookies, variantHeaders } = runExperiments(request, path, experiments, API_BASE, ctx, (rewritten) => { path = rewritten; });
+
+    const applyHeaders = (response) => applyExperimentAssignment(
+      applyCompressionMode(applyHeaderRules(response, path, headerRules), compressionMode),
+      newCookies, variantHeaders
+    );
 
     const isStaticAsset = path.startsWith('/_next/static/') || path.match(/\.(png|jpe?g|gif|svg|ico|css|js|woff2?)$/i);
 
@@ -348,6 +413,99 @@ function applyHeaderRules(response, path, headerRules) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+// When a project disables compression, append the standard `no-transform`
+// Cache-Control directive — the HTTP-level signal that tells any
+// intermediary (Cloudflare's own edge included) not to alter the response
+// body, which is what actually suppresses automatic gzip/Brotli encoding.
+// "auto" (the default) leaves whatever Cache-Control the origin/asset
+// already set untouched.
+function applyCompressionMode(response, compressionMode) {
+  if (compressionMode !== 'disabled') return response;
+
+  const headers = new Headers(response.headers);
+  const existing = headers.get('Cache-Control');
+  headers.set('Cache-Control', existing ? `${existing}, no-transform` : 'no-transform');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function parseCookies(request) {
+  const header = request.headers.get('Cookie') || '';
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    cookies[part.slice(0, eq).trim()] = decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return cookies;
+}
+
+function pickWeightedVariant(variants) {
+  const total = variants.reduce((sum, v) => sum + (v.weight || 1), 0);
+  let roll = Math.random() * total;
+  for (const v of variants) {
+    roll -= v.weight || 1;
+    if (roll <= 0) return v;
+  }
+  return variants[variants.length - 1];
+}
+
+// Runs every active experiment for this request: reads (or assigns) a
+// persistent per-visitor variant via cookie, optionally rewrites the served
+// path for that variant via `setPath`, and schedules exposure/conversion
+// beacons to the API. Conversion is a simple "did this already-assigned
+// visitor hit goalPath" check — a directional signal, not a statistically
+// rigorous test.
+function runExperiments(request, path, experiments, API_BASE, ctx, setPath) {
+  const newCookies = [];
+  const variantHeaders = {};
+  if (!Array.isArray(experiments) || !experiments.length) return { newCookies, variantHeaders };
+
+  const cookies = parseCookies(request);
+  const originalPath = path;
+
+  const postEvent = (experimentId, variant, type) =>
+    fetch(`${API_BASE}/experiments/${experimentId}/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ variant, type }),
+    }).catch(() => {});
+
+  for (const experiment of experiments) {
+    const variantList = Array.isArray(experiment.variants) ? experiment.variants : [];
+    if (variantList.length < 2) continue;
+
+    const cookieName = `dplr_ab_${experiment.key}`;
+    const existingKey = cookies[cookieName];
+    let variant = variantList.find((v) => v.key === existingKey);
+    const isNewAssignment = !variant;
+    if (!variant) variant = pickWeightedVariant(variantList);
+
+    if (isNewAssignment) {
+      newCookies.push(`${cookieName}=${encodeURIComponent(variant.key)}; Path=/; Max-Age=31536000; SameSite=Lax`);
+      ctx.waitUntil(postEvent(experiment.id, variant.key, 'exposure'));
+    }
+
+    variantHeaders[`X-Deployr-Experiment-${experiment.key}`] = variant.key;
+
+    if (variant.pathOverride) setPath(variant.pathOverride);
+
+    if (experiment.goalPath && originalPath === experiment.goalPath) {
+      ctx.waitUntil(postEvent(experiment.id, variant.key, 'conversion'));
+    }
+  }
+
+  return { newCookies, variantHeaders };
+}
+
+function applyExperimentAssignment(response, newCookies, variantHeaders) {
+  if (!newCookies.length && !Object.keys(variantHeaders).length) return response;
+
+  const headers = new Headers(response.headers);
+  for (const [name, value] of Object.entries(variantHeaders)) headers.set(name, value);
+  for (const cookie of newCookies) headers.append('Set-Cookie', cookie);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
 // Best-effort rate limiting: a per-colo counter kept in the Cache API,
 // bucketed by minute. Not a global/exact limiter (each Cloudflare colo has
 // its own count) — it throttles sustained abuse from one region rather than
@@ -376,6 +534,76 @@ function geoBlockedPage() {
     <body><h1>Not available in your region</h1><p>This site isn't accessible from your location.</p></body></html>`,
     { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
   );
+}
+
+// Heuristic bot check, not a Turnstile/CAPTCHA challenge — see Project.botProtection
+// schema comment. Cloudflare's own bot score (request.cf.botManagement.score,
+// 1-99, lower = more bot-like) is only populated on plans with Bot
+// Management; the UA-based checks work on every plan as a fallback.
+function isLikelyBot(request, botProtection) {
+  const ua = request.headers.get('User-Agent') || '';
+
+  if (botProtection.blockEmptyUserAgent && !ua.trim()) return true;
+
+  if (Array.isArray(botProtection.blockedUserAgents)) {
+    const uaLower = ua.toLowerCase();
+    if (botProtection.blockedUserAgents.some((needle) => needle && uaLower.includes(needle.toLowerCase()))) {
+      return true;
+    }
+  }
+
+  const botScore = request.cf?.botManagement?.score;
+  if (typeof botScore === 'number' && typeof botProtection.maxBotScore === 'number' && botScore <= botProtection.maxBotScore) {
+    return true;
+  }
+
+  return false;
+}
+
+function botBlockedPage() {
+  return new Response(
+    `<!doctype html><html><head><meta charset="utf-8"><title>Access denied</title>
+    <style>body{font-family:sans-serif;max-width:420px;margin:20vh auto;padding:0 16px;text-align:center;color:#333}
+    h1{font-size:1.4em}</style></head>
+    <body><h1>Access denied</h1><p>Automated traffic isn't permitted on this site.</p></body></html>`,
+    { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
+  );
+}
+
+// --- IMAGE RESIZING ---
+// GET /_deployr/image?src=/photo.jpg&w=800&q=75&fit=cover&format=auto —
+// resizes an image from this deployment's own static assets on the fly via
+// Cloudflare's Image Resizing (the `cf.image` fetch option). Requires the
+// zone this worker runs on to have Image Resizing enabled (a Cloudflare
+// Pro+/add-on feature) — same "operator must configure their own
+// infrastructure" pattern as codeBuildService.js's Docker builds. If the
+// zone doesn't have it enabled, `cf.image` is silently ignored by
+// Cloudflare and the original, unresized image is returned instead of
+// erroring — so this degrades gracefully rather than breaking image loads.
+const IMAGE_RESIZE_PATH = '/_deployr/image';
+
+async function handleImageResize(request, url, projectId, deploymentId, S3_BASE) {
+  const src = url.searchParams.get('src');
+  if (!src || !src.startsWith('/')) {
+    return new Response('Missing or invalid "src" query parameter', { status: 400 });
+  }
+
+  const width = parseInt(url.searchParams.get('w'), 10);
+  const quality = parseInt(url.searchParams.get('q'), 10);
+  const fit = url.searchParams.get('fit') || 'scale-down';
+  const format = url.searchParams.get('format') || 'auto';
+
+  const targetUrl = `${S3_BASE}/${projectId}/${deploymentId}${src}`;
+
+  const imageOptions = { fit, format };
+  if (Number.isFinite(width) && width > 0) imageOptions.width = width;
+  if (Number.isFinite(quality) && quality > 0 && quality <= 100) imageOptions.quality = quality;
+
+  const resized = await fetch(targetUrl, { cf: { image: imageOptions } });
+
+  const headers = new Headers(resized.headers);
+  headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+  return new Response(resized.body, { status: resized.status, headers });
 }
 
 const PROTECTION_COOKIE = "deployr_preview_auth";

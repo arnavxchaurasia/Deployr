@@ -79,6 +79,43 @@ async function generateInsights(projectId, deploymentId) {
     });
   }
 
+  // ── Single-step regressions vs. the immediately preceding deployment ─────────
+  // Distinct from INCREASING_BUILD_TIME (a 3-build trend) — this catches a
+  // regression introduced by just the last change, the more common case.
+  const currentIndex = recentDeploymentIds.findIndex((d) => d.id === deploymentId);
+  const previousDeploymentId = currentIndex >= 0 ? recentDeploymentIds[currentIndex + 1]?.id : null;
+  const previousSignal = previousDeploymentId ? signals.find((s) => s.deploymentId === previousDeploymentId) : null;
+
+  if (previousSignal?.buildTimeMs && currentSignal.buildTimeMs && currentSignal.buildTimeMs > previousSignal.buildTimeMs * 1.5) {
+    const pctChange = Math.round((currentSignal.buildTimeMs / previousSignal.buildTimeMs - 1) * 100);
+    recommendations.push({
+      ruleCode: 'BUILD_TIME_REGRESSION',
+      title: `Build time regressed ${pctChange}% vs. the previous deployment`,
+      explanation: `This build took ${Math.round(currentSignal.buildTimeMs / 1000)}s, up from ${Math.round(previousSignal.buildTimeMs / 1000)}s on the last deployment.`,
+      recommendation:
+        'Check what changed in this push — a new dependency, a build config change, or a larger input file are the usual causes.',
+      severity: 'high',
+      impact: 'performance',
+      confidence: 0.85,
+    });
+  }
+
+  // ── BUNDLE_SIZE_REGRESSION ─────────────────────────────────────────────────
+  if (previousSignal?.bundleSizeBytes && currentSignal.bundleSizeBytes && currentSignal.bundleSizeBytes > previousSignal.bundleSizeBytes * 1.2) {
+    const pctChange = Math.round((currentSignal.bundleSizeBytes / previousSignal.bundleSizeBytes - 1) * 100);
+    const fmt = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+    recommendations.push({
+      ruleCode: 'BUNDLE_SIZE_REGRESSION',
+      title: `Bundle size grew ${pctChange}% vs. the previous deployment`,
+      explanation: `Output size went from ${fmt(previousSignal.bundleSizeBytes)} to ${fmt(currentSignal.bundleSizeBytes)}.`,
+      recommendation:
+        'Check for a newly added large dependency or asset. Consider dynamic imports/code splitting, or moving large assets to an external CDN.',
+      severity: 'medium',
+      impact: 'performance',
+      confidence: 0.8,
+    });
+  }
+
   // ── FREQUENT_FAILURES ────────────────────────────────────────────────────────
   const total = recentDeploymentIds.length;
   if (total > 0) {
@@ -119,25 +156,13 @@ async function generateInsights(projectId, deploymentId) {
 
   // ── Persist recommendations ──────────────────────────────────────────────────
   for (const rec of recommendations) {
-    try {
-      await prisma.deploymentRecommendation.upsert({
-        where: {
-          deploymentId_ruleCode: { deploymentId, ruleCode: rec.ruleCode },
-        },
-        create: { deploymentId, ...rec },
-        update: { ...rec },
-      });
-    } catch (upsertErr) {
-      // Composite unique may not be migrated yet — fall back to createMany with skipDuplicates
-      if (upsertErr.code === 'P2025' || upsertErr.code === 'P2002' || upsertErr.message?.includes('unique')) {
-        await prisma.deploymentRecommendation.createMany({
-          data: recommendations.map((r) => ({ deploymentId, ...r })),
-          skipDuplicates: true,
-        });
-        break;
-      }
-      throw upsertErr;
-    }
+    await prisma.deploymentRecommendation.upsert({
+      where: {
+        deploymentId_ruleCode: { deploymentId, ruleCode: rec.ruleCode },
+      },
+      create: { deploymentId, ...rec },
+      update: { ...rec },
+    });
   }
 
   return recommendations;

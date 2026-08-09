@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import {
   Users, Plus, Loader2, Trash2, Crown, Shield,
   UserCheck, Mail, ChevronDown, Building2, CreditCard, CheckCircle2, FileText, Webhook,
+  Layers, X, Receipt, Download, ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -61,6 +62,21 @@ interface OrgDetail {
   members: Member[];
 }
 
+interface OrgInvoice {
+  id: string;
+  amountPaise: number;
+  currency: string;
+  description: string;
+  createdAt: string;
+}
+
+interface EnvGroup {
+  id: string;
+  name: string;
+  variables: { id: string; key: string; updatedAt: string }[];
+  attachedProjectCount: number;
+}
+
 const ROLE_LABELS: Record<OrgRole, string> = { OWNER: "Owner", ADMIN: "Admin", MEMBER: "Member" };
 const ROLE_ICON: Record<OrgRole, React.ReactNode> = {
   OWNER:  <Crown  size={12} className="text-amber-500" />,
@@ -99,6 +115,31 @@ export default function TeamSettingsPage() {
       setBilling(data);
     } catch {
       setBilling(null);
+    }
+  }
+
+  const [orgInvoices, setOrgInvoices] = useState<OrgInvoice[]>([]);
+
+  async function fetchOrgInvoices(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/billing/invoices`);
+      setOrgInvoices(data);
+    } catch {
+      setOrgInvoices([]);
+    }
+  }
+
+  async function downloadOrgReceipt(orgId: string, invoiceId: string) {
+    try {
+      const res = await api.get(`/orgs/${orgId}/billing/invoices/${invoiceId}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `deployr-receipt-${invoiceId}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Failed to download receipt");
     }
   }
 
@@ -188,6 +229,120 @@ export default function TeamSettingsPage() {
     }
   }
 
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoEntryPoint, setSsoEntryPoint] = useState("");
+  const [ssoIssuer, setSsoIssuer] = useState("");
+  const [ssoCert, setSsoCert] = useState("");
+  const [ssoDomain, setSsoDomain] = useState("");
+  const [ssoAcsUrl, setSsoAcsUrl] = useState("");
+  const [savingSso, setSavingSso] = useState(false);
+
+  async function fetchSso(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/sso`);
+      setSsoEnabled(Boolean(data.samlEnabled));
+      setSsoEntryPoint(data.samlEntryPoint || "");
+      setSsoIssuer(data.samlIssuer || "");
+      setSsoCert(data.samlCert || "");
+      setSsoDomain(data.ssoDomain || "");
+      setSsoAcsUrl(data.acsUrl || "");
+    } catch {
+      // Not an owner, or SSO not applicable — leave defaults
+    }
+  }
+
+  async function saveSso() {
+    if (!selected) return;
+    setSavingSso(true);
+    try {
+      await call.post(`/orgs/${selected.id}/sso`, {
+        samlEnabled: ssoEnabled,
+        samlEntryPoint: ssoEntryPoint.trim(),
+        samlIssuer: ssoIssuer.trim(),
+        samlCert: ssoCert.trim(),
+        ssoDomain: ssoDomain.trim(),
+      });
+      toast.success("SSO settings saved");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to save SSO settings");
+    } finally {
+      setSavingSso(false);
+    }
+  }
+
+  const [envGroups, setEnvGroups] = useState<EnvGroup[]>([]);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  const [openGroupId, setOpenGroupId] = useState<string | null>(null);
+  const [newVarKey, setNewVarKey] = useState("");
+  const [newVarValue, setNewVarValue] = useState("");
+  const [savingVar, setSavingVar] = useState(false);
+
+  async function fetchEnvGroups(orgId: string) {
+    try {
+      const data = await call.get(`/orgs/${orgId}/env-groups`);
+      setEnvGroups(data);
+    } catch {
+      setEnvGroups([]);
+    }
+  }
+
+  async function createEnvGroup() {
+    if (!selected || !newGroupName.trim()) return;
+    setCreatingGroup(true);
+    try {
+      await call.post(`/orgs/${selected.id}/env-groups`, { name: newGroupName.trim() });
+      setNewGroupName("");
+      toast.success("Env group created");
+      fetchEnvGroups(selected.id);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to create env group");
+    } finally {
+      setCreatingGroup(false);
+    }
+  }
+
+  async function deleteEnvGroup(groupId: string) {
+    if (!selected) return;
+    if (!confirm("Delete this env group? Projects using it will lose these shared variables.")) return;
+    try {
+      await call.delete(`/orgs/${selected.id}/env-groups/${groupId}`);
+      toast.success("Env group deleted");
+      fetchEnvGroups(selected.id);
+    } catch {
+      toast.error("Failed to delete env group");
+    }
+  }
+
+  async function addGroupVariable(groupId: string) {
+    if (!selected || !newVarKey.trim() || !newVarValue.trim()) return;
+    setSavingVar(true);
+    try {
+      await call.post(`/orgs/${selected.id}/env-groups/${groupId}/variables`, {
+        key: newVarKey.trim(),
+        value: newVarValue.trim(),
+      });
+      setNewVarKey("");
+      setNewVarValue("");
+      toast.success("Variable saved");
+      fetchEnvGroups(selected.id);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to save variable");
+    } finally {
+      setSavingVar(false);
+    }
+  }
+
+  async function removeGroupVariable(groupId: string, key: string) {
+    if (!selected) return;
+    try {
+      await call.delete(`/orgs/${selected.id}/env-groups/${groupId}/variables/${encodeURIComponent(key)}`);
+      fetchEnvGroups(selected.id);
+    } catch {
+      toast.error("Failed to remove variable");
+    }
+  }
+
   async function upgradeTeam() {
     if (!selected) return;
     setUpgrading(true);
@@ -263,8 +418,11 @@ export default function TeamSettingsPage() {
       const data = await call.get(`/orgs/${org.id}`);
       setSelected(data as OrgDetail);
       fetchBilling(org.id);
+      fetchOrgInvoices(org.id);
       fetchAuditExport(org.id);
       fetchOrgWebhook(org.id);
+      fetchEnvGroups(org.id);
+      fetchSso(org.id);
     } catch {
       toast.error("Failed to load team details");
     } finally {
@@ -315,6 +473,7 @@ export default function TeamSettingsPage() {
   }
 
   const canManage = orgs.find(o => o.id === selected?.id)?.role !== "MEMBER";
+  const isOwner = orgs.find(o => o.id === selected?.id)?.role === "OWNER";
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -431,6 +590,25 @@ export default function TeamSettingsPage() {
               {billing.plan === "FREE" ? "Upgrade team" : `Buy ${billing.memberCount} seats`}
             </Button>
           )}
+
+          {orgInvoices.length > 0 && (
+            <div className="pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-2">
+              <p className="text-xs font-medium text-zinc-500 flex items-center gap-1.5">
+                <Receipt size={12} /> Billing history
+              </p>
+              {orgInvoices.map((inv) => (
+                <div key={inv.id} className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-600 dark:text-zinc-300">{inv.description} · {new Date(inv.createdAt).toLocaleDateString()}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-zinc-500">{inv.currency === "INR" ? "₹" : ""}{(inv.amountPaise / 100).toFixed(2)}</span>
+                    <Button variant="outline" size="sm" onClick={() => downloadOrgReceipt(selected.id, inv.id)} className="h-6 px-2 gap-1">
+                      <Download size={11} /> PDF
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       )}
 
@@ -503,6 +681,118 @@ export default function TeamSettingsPage() {
               </Button>
             )}
           </div>
+        </Card>
+      )}
+
+      {selected && !loadingDetail && isOwner && (
+        <Card className="p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={16} className="text-indigo-500" />
+              <p className="text-sm font-medium">SAML SSO</p>
+            </div>
+            <Button size="sm" variant={ssoEnabled ? "default" : "outline"} onClick={() => setSsoEnabled((e) => !e)}>
+              {ssoEnabled ? "Enabled" : "Disabled"}
+            </Button>
+          </div>
+          <p className="text-xs text-zinc-500">
+            Members with an email at the configured domain are redirected to your IdP instead of the
+            password form. A successful sign-in auto-provisions the user and adds them to this team.
+          </p>
+
+          {ssoAcsUrl && (
+            <div className="text-xs bg-zinc-50 dark:bg-zinc-900 rounded-lg p-3 space-y-1">
+              <p className="text-zinc-500">Give your IdP this ACS URL:</p>
+              <code className="font-mono text-[11px] break-all">{ssoAcsUrl}</code>
+            </div>
+          )}
+
+          <div className="grid gap-3">
+            <Input value={ssoDomain} onChange={(e) => setSsoDomain(e.target.value)} placeholder="Email domain, e.g. acme.com" className="text-sm font-mono" />
+            <Input value={ssoEntryPoint} onChange={(e) => setSsoEntryPoint(e.target.value)} placeholder="IdP SSO URL (entry point)" className="text-sm font-mono" />
+            <Input value={ssoIssuer} onChange={(e) => setSsoIssuer(e.target.value)} placeholder="IdP Issuer / Entity ID" className="text-sm font-mono" />
+            <textarea
+              value={ssoCert}
+              onChange={(e) => setSsoCert(e.target.value)}
+              placeholder="-----BEGIN CERTIFICATE-----..."
+              rows={4}
+              className="w-full text-xs font-mono border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 rounded-lg outline-none focus:ring-2 focus:ring-black dark:focus:ring-white transition"
+            />
+          </div>
+
+          <Button size="sm" onClick={saveSso} disabled={savingSso}>
+            {savingSso ? <Loader2 size={13} className="animate-spin" /> : "Save"}
+          </Button>
+        </Card>
+      )}
+
+      {selected && !loadingDetail && canManage && (
+        <Card className="p-5 space-y-4">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Layers size={16} className="text-indigo-500" />
+              <p className="text-sm font-medium">Shared env variable groups</p>
+            </div>
+            <p className="text-xs text-zinc-500">
+              A named set of env vars you can attach to multiple projects — a project's own env vars
+              always win over a shared group on key conflicts.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Input
+              value={newGroupName}
+              onChange={(e) => setNewGroupName(e.target.value)}
+              placeholder="e.g. shared-database"
+              className="text-sm"
+            />
+            <Button size="sm" onClick={createEnvGroup} disabled={creatingGroup || !newGroupName.trim()} className="shrink-0 gap-1.5">
+              {creatingGroup ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+              New group
+            </Button>
+          </div>
+
+          {envGroups.length > 0 && (
+            <div className="space-y-2">
+              {envGroups.map((g) => (
+                <div key={g.id} className="border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setOpenGroupId(openGroupId === g.id ? null : g.id)}
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                  >
+                    <span className="font-medium">{g.name}</span>
+                    <span className="text-xs text-zinc-400">
+                      {g.variables.length} var{g.variables.length !== 1 ? "s" : ""} · {g.attachedProjectCount} project{g.attachedProjectCount !== 1 ? "s" : ""}
+                    </span>
+                  </button>
+
+                  {openGroupId === g.id && (
+                    <div className="px-3 pb-3 space-y-2 border-t border-zinc-100 dark:border-zinc-800 pt-2">
+                      {g.variables.map((v) => (
+                        <div key={v.id} className="flex items-center justify-between text-xs font-mono bg-zinc-50 dark:bg-zinc-900 px-2 py-1.5 rounded">
+                          {v.key}
+                          <button onClick={() => removeGroupVariable(g.id, v.key)} className="text-red-400 hover:text-red-500">
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ))}
+                      <div className="flex gap-2">
+                        <Input value={newVarKey} onChange={(e) => setNewVarKey(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))} placeholder="KEY" className="text-xs font-mono" />
+                        <Input type="password" value={newVarValue} onChange={(e) => setNewVarValue(e.target.value)} placeholder="value" className="text-xs font-mono" />
+                        <Button size="sm" onClick={() => addGroupVariable(g.id)} disabled={savingVar || !newVarKey.trim() || !newVarValue.trim()} className="shrink-0">
+                          Add
+                        </Button>
+                      </div>
+                      <button onClick={() => deleteEnvGroup(g.id)} className="text-xs text-red-500 hover:text-red-600 flex items-center gap-1">
+                        <Trash2 size={11} /> Delete group
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </Card>
       )}
 

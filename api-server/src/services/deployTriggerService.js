@@ -7,6 +7,8 @@ const { getRegionConfig, RunTaskCommand } = require('./awsService');
 const codeBuildService = require('./codeBuildService');
 const { provisionPreviewDatabase } = require('./previewDatabaseService');
 const { buildIntegrationEnvVars } = require('./integrationsService');
+const { getProjectEnvGroupVars } = require('./envGroupService');
+const { getProjectStorageAddonVars } = require('./storageAddonService');
 
 // Shared by every VCS webhook handler (GitHub, GitLab, Bitbucket) so a push
 // or PR/MR event from any provider triggers the same ECS build pipeline.
@@ -15,20 +17,24 @@ function slugifyBranch(branch) {
   return branch.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
-function buildUserEnvVars(project, targetEnv) {
+async function buildUserEnvVars(project, targetEnv) {
   const userEnvVarsObj = {};
   for (const e of project.environmentVariables ?? []) {
     if (e.environment === 'all' || e.environment === targetEnv) {
       userEnvVarsObj[e.key] = decrypt(e.value);
     }
   }
-  // Enabled marketplace connectors (Slack/Sentry/Datadog/...) inject their
-  // own env vars too — a real environment variable with the same key always
-  // wins, since a user explicitly setting one is more specific than the
-  // connector default. (snapshot before merging: target and the "restore
-  // precedence" source can't be the same object reference, or it's a no-op)
+  // Precedence, lowest to highest: shared EnvGroup vars and managed storage
+  // add-ons < marketplace connector vars (Slack/Sentry/Datadog/...) < this
+  // project's own explicit EnvironmentVariable rows. (snapshot before
+  // merging: target and the "restore precedence" source can't be the same
+  // object reference, or the restore is a no-op)
   const explicitEnvVars = { ...userEnvVarsObj };
-  Object.assign(userEnvVarsObj, buildIntegrationEnvVars(project.integrations), explicitEnvVars);
+  const [groupEnvVars, storageAddonVars] = await Promise.all([
+    getProjectEnvGroupVars(project.id),
+    getProjectStorageAddonVars(project.id),
+  ]);
+  Object.assign(userEnvVarsObj, groupEnvVars, storageAddonVars, buildIntegrationEnvVars(project.integrations), explicitEnvVars);
   return userEnvVarsObj;
 }
 
@@ -67,7 +73,10 @@ async function runBuildTask(deployment, regionConfig, extraEnv) {
 }
 
 async function triggerECSBuild({ project, branch, commitHash, trigger, prNumber = null }) {
-  const isPreview = branch !== 'main' && branch !== 'master';
+  // Staging takes precedence over the preview classification — it's a
+  // persistent named branch, not a PR/feature branch that gets torn down.
+  const isStaging = !!project.stagingBranch && branch === project.stagingBranch;
+  const isPreview = !isStaging && branch !== 'main' && branch !== 'master';
   let previewSubdomain = null;
 
   if (isPreview) {
@@ -92,13 +101,15 @@ async function triggerECSBuild({ project, branch, commitHash, trigger, prNumber 
       trigger,
       startedAt: new Date(),
       isPreview,
+      isStaging,
       previewSubdomain,
       prNumber,
       region: regionConfig.region,
     },
   });
 
-  const userEnvVarsObj = buildUserEnvVars(project, isPreview ? 'preview' : 'production');
+  const targetEnv = isStaging ? 'staging' : isPreview ? 'preview' : 'production';
+  const userEnvVarsObj = await buildUserEnvVars(project, targetEnv);
 
   // Ephemeral preview databases: only for previews, and only if the project
   // has a provisioning webhook configured. Awaited — the build needs the
@@ -174,7 +185,7 @@ async function triggerUploadBuild({ project, archiveS3Key }) {
     },
   });
 
-  const userEnvVarsObj = buildUserEnvVars(project, 'production');
+  const userEnvVarsObj = await buildUserEnvVars(project, 'production');
 
   await runBuildTask(deployment, regionConfig, [
     { name: 'PREBUILT_ARCHIVE_S3_KEY', value: archiveS3Key },

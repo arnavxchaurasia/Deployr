@@ -5,7 +5,8 @@ const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { rateLimit } = require('../middlewares/rateLimitMiddleware');
 const mailService = require('../services/mailService');
-const { checkBuildQuota } = require('../services/quotaService');
+const { checkBuildQuota, forecastMonthlyUsage } = require('../services/quotaService');
+const { streamInvoicePdf } = require('../services/invoiceService');
 
 const router = express.Router();
 
@@ -78,6 +79,16 @@ router.post("/payment/verify", authMiddleware, async (req, res) => {
       },
     });
 
+    await prisma.invoice.create({
+      data: {
+        userId: req.user.id,
+        razorpayOrderId: razorpay_order_id,
+        razorpayPaymentId: razorpay_payment_id,
+        amountPaise: 160000,
+        description: 'Deployr Pro — monthly subscription',
+      },
+    }).catch((err) => console.error('Failed to record invoice:', err));
+
     await mailService.sendPaymentSuccessEmail(user.email, "1,600").catch(console.error);
 
     res.json({ success: true, message: "Payment verified successfully" });
@@ -90,11 +101,13 @@ router.post("/payment/verify", authMiddleware, async (req, res) => {
 router.get("/usage", authMiddleware, async (req, res) => {
   try {
     const quota = await checkBuildQuota({ userId: req.user.id });
+    const forecast = forecastMonthlyUsage(quota.used, quota.limit);
     res.json({
       plan: quota.plan,
       buildMinutesUsed: Math.round(quota.used * 10) / 10,
       buildMinutesLimit: quota.limit,
       quotaExceeded: !quota.allowed,
+      forecast,
     });
   } catch (err) {
     console.error("Usage fetch error:", err);
@@ -135,6 +148,36 @@ router.post("/payment/cancel", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error("Cancel subscription error:", err);
     res.status(500).json({ error: "Failed to cancel subscription" });
+  }
+});
+
+// GET /billing/invoices — this user's personal payment history.
+router.get("/billing/invoices", authMiddleware, async (req, res) => {
+  try {
+    const invoices = await prisma.invoice.findMany({
+      where: { userId: req.user.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json(invoices);
+  } catch (err) {
+    console.error("List invoices error:", err);
+    res.status(500).json({ error: "Failed to fetch invoices" });
+  }
+});
+
+// GET /billing/invoices/:id/pdf — downloadable PDF receipt.
+router.get("/billing/invoices/:id/pdf", authMiddleware, async (req, res) => {
+  try {
+    const invoice = await prisma.invoice.findFirst({
+      where: { id: req.params.id, userId: req.user.id },
+    });
+    if (!invoice) return res.status(404).json({ error: "Not found" });
+
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true, email: true } });
+    streamInvoicePdf(res, invoice, user?.name || user?.email || 'Customer');
+  } catch (err) {
+    console.error("Invoice PDF error:", err);
+    res.status(500).json({ error: "Failed to generate receipt" });
   }
 });
 

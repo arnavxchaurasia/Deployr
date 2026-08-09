@@ -79,6 +79,7 @@ model User {
   memberships   OrganizationMembership[]
   auditLogs     AuditLog[]
   notifications Notification[]
+  invoices      Invoice[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -103,6 +104,7 @@ model DeploymentSignal {
   buildTimeMs     Int?
   installTimeMs   Int?
   bundleTimeMs    Int?
+  bundleSizeBytes Int?
   warningsCount   Int?
 
   createdAt DateTime @default(now())
@@ -139,6 +141,11 @@ model DeploymentRecommendation {
 
   applied   Boolean?
   createdAt DateTime @default(now())
+
+  // insightsService.js upserts on this compound key so re-running the rule
+  // engine updates an existing recommendation instead of duplicating it —
+  // this index must exist for that upsert to work at all.
+  @@unique([deploymentId, ruleCode])
 }
 
 model Organization {
@@ -170,9 +177,34 @@ model Organization {
   // plain { event, orgId, ...details } JSON body.
   webhookUrl String? @map("webhook_url")
 
+  // SAML SSO — when enabled, any user signing in with an email at
+  // ssoDomain is redirected to samlEntryPoint (the IdP's SSO URL) instead of
+  // the normal password form. samlIssuer/samlCert identify and verify
+  // assertions from that IdP. A successful assertion auto-provisions the
+  // user (email verified — the IdP vouches for it) and joins them to this
+  // org as a MEMBER if they aren't already one. See samlRoutes.js.
+  samlEnabled    Boolean @default(false) @map("saml_enabled")
+  samlEntryPoint String? @map("saml_entry_point")
+  samlIssuer     String? @map("saml_issuer")
+  samlCert       String? @map("saml_cert")
+  ssoDomain      String? @unique @map("sso_domain")
+
+  // Last time this org's weekly digest email went out — guards against
+  // sending twice in the same week if the job restarts (see digestJob.js).
+  lastDigestSentAt DateTime? @map("last_digest_sent_at")
+
+  // Governance: how long to keep this org's project-scoped audit log
+  // entries before purging (see auditRetentionJob.js). Null means keep
+  // forever. Only applies to AuditLog rows tied to one of this org's
+  // projects — org-scoped events (member joined/left, etc.) have no
+  // projectId to attribute, so they're outside this policy's reach today.
+  auditLogRetentionDays Int? @map("audit_log_retention_days")
+
   memberships OrganizationMembership[]
   projects    Project[]
   invitations Invitation[]
+  envGroups   EnvGroup[]
+  invoices    Invoice[]
 }
 
 model OrganizationMembership {
@@ -268,6 +300,13 @@ model Project {
   maintenanceMode    Boolean @default(false) @map("maintenance_mode")
   maintenanceMessage String? @map("maintenance_message")
 
+  // Manual promotion gate — when set, a production build that finishes
+  // READY does NOT auto-promote to the live deployment. It sits with
+  // Deployment.awaitingApproval = true until an ADMIN/OWNER calls
+  // POST /deployments/:id/approve (or /reject). Preview deployments are
+  // never gated — this only affects what real end-user traffic sees.
+  requireApproval Boolean @default(false) @map("require_approval")
+
   // Deployment blackout windows — recurring weekly UTC windows during which
   // /deploy calls (manual or webhook-triggered) are rejected rather than
   // queued. Distinct from cron jobs, which make something happen on a
@@ -316,6 +355,24 @@ model Project {
   // Distinct from `region`, which is where new builds run by default.
   failoverRegion String? @map("failover_region")
 
+  // Basic bot protection — { mode: "off" | "block", blockEmptyUserAgent:
+  // bool, blockedUserAgents: string[] (case-insensitive substrings),
+  // maxBotScore?: number }. Evaluated at the worker: request.cf.botManagement
+  // (Cloudflare's bot score, 1-99, lower = more bot-like — only populated on
+  // plans with Bot Management) is checked against maxBotScore if both are
+  // set; UA substring/empty checks always apply regardless of plan. This is
+  // a heuristic filter, not a Turnstile/CAPTCHA challenge.
+  botProtection Json? @map("bot_protection")
+
+  // "auto" (default) leaves Cloudflare's automatic edge compression
+  // (gzip/Brotli, based on the visitor's Accept-Encoding) untouched.
+  // "disabled" tells the worker to mark responses `Cache-Control:
+  // no-transform`, the standard HTTP directive that tells an intermediary
+  // (including Cloudflare's own edge) not to alter the response body at
+  // all — useful for already-compressed or streaming payloads where
+  // re-compression wastes CPU or breaks framing.
+  compressionMode String @default("auto") @map("compression_mode")
+
   // Integrations marketplace — third-party connector config, keyed by
   // connector id (e.g. "slack", "sentry", "datadog"). Shape is
   // connector-specific (see integrationsService's CONNECTORS registry).
@@ -346,6 +403,14 @@ model Project {
   githubOwner           String?
   githubRepo            String?
   githubDefaultBranch   String? @default("main")
+
+  // Staging environment — a long-lived, persistent third tier distinct
+  // from ephemeral PR previews (torn down on PR close) and production.
+  // Pushes to this branch build a Deployment with isStaging=true, served at
+  // <slug>-staging.<base-domain>, using "staging"-scoped env vars, and
+  // never auto-promoted — an admin manually promotes it to production the
+  // same way as any other READY deployment.
+  stagingBranch String? @map("staging_branch")
   deploymentRetentionCount Int  @default(3)
 
   userId String
@@ -360,8 +425,12 @@ model Project {
   uptimeChecks         UptimeCheck[]
   cronJobs             CronJob[]
   featureFlags         FeatureFlag[]
+  experiments          Experiment[]
+  storageAddons        StorageAddon[]
+  traceSpans           TraceSpan[]
   statusSubscribers    StatusSubscriber[]
   memberOverrides      ProjectMemberOverride[]
+  envGroupLinks        ProjectEnvGroup[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -396,6 +465,11 @@ model Deployment {
 
   isActive Boolean @default(false)
 
+  // Set when this is a READY production build held back by the project's
+  // requireApproval gate — cleared (either way) once an admin approves or
+  // rejects it. Never set for preview deployments.
+  awaitingApproval Boolean @default(false)
+
   taskArn     String?
   functionUrl String?
   functionUrls Json? @map("function_urls")
@@ -411,6 +485,11 @@ model Deployment {
   logsUrl String?
 
   isPreview        Boolean @default(false) @map("is_preview")
+
+  // A staging deployment — not ephemeral like a preview (never cleaned up
+  // on PR close), not auto-promoted like production. See
+  // Project.stagingBranch schema comment.
+  isStaging        Boolean @default(false) @map("is_staging")
   previewSubdomain String? @unique @map("preview_subdomain")
 
   prNumber Int?
@@ -438,6 +517,35 @@ model LogEvent {
   timestamp DateTime @default(now())
 
   @@index([deploymentId, timestamp])
+}
+
+// A single span from a distributed trace, ingested from a deployed
+// function's own instrumentation (see POST /traces). Deliberately a
+// simplified span shape, not a full OTLP/gRPC collector — this platform
+// accepts a lightweight JSON batch rather than running an OpenTelemetry
+// Collector, and renders traces as a waterfall grouped by traceId.
+model TraceSpan {
+  id           String  @id @default(cuid())
+  projectId    String
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deploymentId String?
+
+  traceId      String
+  spanId       String
+  parentSpanId String?
+  name         String
+
+  startTime DateTime
+  endTime   DateTime
+  durationMs Int
+
+  status     String? // "ok" | "error"
+  attributes Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId, traceId])
+  @@index([projectId, createdAt])
 }
 
 model RequestLog {
@@ -535,6 +643,135 @@ model AuditLog {
   @@index([userId])
 }
 
+// A reusable, named set of env vars owned by an org — attach the same group
+// to multiple projects instead of copy-pasting shared secrets (a common
+// database URL, a shared third-party API key) into each project's own
+// EnvironmentVariable rows individually. Merged into the build at the
+// lowest precedence — a project's own EnvironmentVariable with the same key
+// always wins, so a project can override just one key from a shared group.
+model EnvGroup {
+  id    String       @id @default(cuid())
+  orgId String
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  name String
+
+  variables EnvGroupVariable[]
+  projects  ProjectEnvGroup[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+model EnvGroupVariable {
+  id      String   @id @default(cuid())
+  groupId String
+  group   EnvGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  key   String
+  value String // encrypted, same as EnvironmentVariable.value
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([groupId, key])
+  @@index([groupId])
+}
+
+// Join table between Project and EnvGroup — explicit (not an implicit
+// Prisma m2m) so it can carry future per-link metadata and is trivial to
+// hand-migrate.
+// A persistent, project-scoped managed storage add-on (Postgres/Redis/KV/
+// blob) — distinct from previewDatabaseService's ephemeral per-deployment
+// preview databases. Provisioned once, its connection string is injected
+// as a build-time env var into every deployment (all environments), the
+// same "operator plugs in their own provider" model as preview databases:
+// either paste a connection string directly, or point at a provisioning
+// webhook this fires { action: "create" | "destroy", projectId, addonId }
+// at and expects { connectionString } back from.
+model StorageAddon {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  type    String // "postgres" | "redis" | "kv" | "blob"
+  name    String
+  envVarKey String @map("env_var_key")
+
+  provisionWebhookUrl String? @map("provision_webhook_url")
+  connectionString    String? @map("connection_string") // encrypted, same as EnvironmentVariable.value
+
+  status String @default("pending") // "pending" | "provisioned" | "failed"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, envVarKey])
+  @@index([projectId])
+}
+
+model ProjectEnvGroup {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  groupId   String
+  group     EnvGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, groupId])
+  @@index([projectId])
+  @@index([groupId])
+}
+
+// A/B test — distinct from FeatureFlag (a boolean/percentage toggle the app
+// code checks) and from canary rollout (splits traffic between two
+// deployment *versions*). An Experiment splits traffic between named
+// variants of the SAME deployment, assigns a visitor to one persistently
+// (a cookie, not a per-request coin flip), and — with no app code required —
+// can rewrite the served path per variant and count a hit on `goalPath` as
+// a conversion for whichever variant that visitor was assigned.
+model Experiment {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  key     String
+  enabled Boolean @default(true)
+
+  // [{ key: "control", weight: 50, pathOverride: null }, { key: "b", weight: 50, pathOverride: "/index-b.html" }]
+  variants Json
+
+  // A hit on this path, from a visitor already assigned a variant, counts
+  // as a conversion for that variant. Null disables conversion tracking
+  // (exposure-only).
+  goalPath String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events ExperimentEvent[]
+
+  @@unique([projectId, key])
+  @@index([projectId])
+}
+
+model ExperimentEvent {
+  id           String     @id @default(cuid())
+  experimentId String
+  experiment   Experiment @relation(fields: [experimentId], references: [id], onDelete: Cascade)
+
+  variant String
+  type    String // "exposure" | "conversion"
+
+  createdAt DateTime @default(now())
+
+  @@index([experimentId, type, createdAt])
+}
+
 model FeatureFlag {
   id        String   @id @default(cuid())
   projectId String
@@ -577,6 +814,31 @@ model ProjectMemberOverride {
 
   @@unique([projectId, userId])
   @@index([projectId])
+}
+
+// A record of a successful payment — either a personal Pro upgrade (userId
+// set) or an org seat purchase (orgId set), never both. Unlike
+// User.razorpayPaymentId / Organization.razorpayOrderId (which just hold
+// the most recent payment, overwritten on the next one), this is an
+// append-only history so past invoices/receipts stay retrievable.
+model Invoice {
+  id     String  @id @default(cuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orgId  String?
+  org    Organization? @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  razorpayOrderId   String
+  razorpayPaymentId String
+
+  amountPaise Int
+  currency    String @default("INR")
+  description String
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([orgId])
 }
 
 model CronJob {

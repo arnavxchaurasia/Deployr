@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import {
   Lock, Plus, Trash2, ArrowLeft, Key, Settings2,
   Webhook, Copy, RefreshCw, X, Save, Terminal, ShieldCheck, CalendarClock,
-  Download, Upload, Route, Globe2, Gauge,
+  Download, Upload, Route, Globe2, Gauge, Image as ImageIcon,
 } from "lucide-react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -38,6 +38,15 @@ function timeToMinutes(t: string) {
   const [h, m] = t.split(":").map(Number);
   return h * 60 + m;
 }
+
+type StorageAddon = {
+  id: string;
+  type: "postgres" | "redis" | "kv" | "blob";
+  name: string;
+  envVarKey: string;
+  status: string;
+  hasConnectionString: boolean;
+};
 
 type RedirectRule = { source: string; destination: string; type: "redirect" | "rewrite"; statusCode?: number };
 type HeaderRule = { source: string; headers: Record<string, string> };
@@ -109,6 +118,8 @@ export default function SettingsPage() {
 
 // ── Environment Variables tab ─────────────────────────────────────────────────
 
+type EnvGroupSummary = { id: string; name: string };
+
 function EnvVarsTab({ projectId }: { projectId: string }) {
   const [envs, setEnvs] = useState<EnvVar[]>([]);
   const [loading, setLoading] = useState(true);
@@ -116,6 +127,11 @@ function EnvVarsTab({ projectId }: { projectId: string }) {
   const [newValue, setNewValue] = useState("");
   const [bulkEnvStr, setBulkEnvStr] = useState("");
   const [saving, setSaving] = useState(false);
+
+  const [orgId, setOrgId] = useState<string | null>(null);
+  const [orgGroups, setOrgGroups] = useState<EnvGroupSummary[]>([]);
+  const [attachedGroups, setAttachedGroups] = useState<EnvGroupSummary[]>([]);
+  const [savingGroupId, setSavingGroupId] = useState<string | null>(null);
 
   const fetchEnvs = useCallback(async () => {
     try {
@@ -129,6 +145,41 @@ function EnvVarsTab({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   useEffect(() => { fetchEnvs(); }, [fetchEnvs]);
+
+  useEffect(() => {
+    api.get(`/project/${projectId}`).then(async (res) => {
+      const projOrgId = res.data.data.orgId;
+      setOrgId(projOrgId);
+      if (!projOrgId) return;
+      try {
+        const [groupsRes, attachedRes] = await Promise.all([
+          api.get(`/orgs/${projOrgId}/env-groups`),
+          api.get(`/project/${projectId}/env-groups`),
+        ]);
+        setOrgGroups(groupsRes.data.map((g: { id: string; name: string }) => ({ id: g.id, name: g.name })));
+        setAttachedGroups(attachedRes.data);
+      } catch {
+        // Shared env groups are optional — silently skip if unavailable
+      }
+    }).catch(() => {});
+  }, [projectId]);
+
+  async function toggleGroup(group: EnvGroupSummary, attach: boolean) {
+    setSavingGroupId(group.id);
+    try {
+      if (attach) {
+        await api.post(`/project/${projectId}/env-groups/${group.id}`);
+        setAttachedGroups((g) => [...g, group]);
+      } else {
+        await api.delete(`/project/${projectId}/env-groups/${group.id}`);
+        setAttachedGroups((g) => g.filter((x) => x.id !== group.id));
+      }
+    } catch {
+      toast.error(`Failed to ${attach ? "attach" : "detach"} group`);
+    } finally {
+      setSavingGroupId(null);
+    }
+  }
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -180,6 +231,36 @@ function EnvVarsTab({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-8">
+      {orgId && orgGroups.length > 0 && (
+        <Card className="p-6 bg-zinc-50/50 dark:bg-zinc-900/50">
+          <h2 className="text-base font-semibold mb-1">Shared Env Groups</h2>
+          <p className="text-xs text-zinc-500 mb-4">
+            Attach a team-wide shared variable set. Manage groups and their variables in{" "}
+            <a href="/dashboard/settings/team" className="text-indigo-500 hover:underline">Team Settings</a>.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {orgGroups.map((g) => {
+              const attached = attachedGroups.some((a) => a.id === g.id);
+              return (
+                <button
+                  key={g.id}
+                  type="button"
+                  disabled={savingGroupId === g.id}
+                  onClick={() => toggleGroup(g, !attached)}
+                  className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+                    attached
+                      ? "bg-indigo-500 border-indigo-500 text-white"
+                      : "border-zinc-200 dark:border-zinc-700 text-zinc-500 hover:border-indigo-400"
+                  }`}
+                >
+                  {g.name}
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Card className="p-6 bg-zinc-50/50 dark:bg-zinc-900/50">
           <h2 className="text-base font-semibold mb-4">Add Variable</h2>
@@ -275,6 +356,9 @@ function BuildConfigTab({ projectId }: { projectId: string }) {
   const [failoverRegion, setFailoverRegion] = useState("");
   const [savingFailover, setSavingFailover] = useState(false);
 
+  const [stagingBranch, setStagingBranch] = useState("");
+  const [savingStagingBranch, setSavingStagingBranch] = useState(false);
+
   const [smokeTestPath, setSmokeTestPath] = useState("");
   const [savingSmokeTest, setSavingSmokeTest] = useState(false);
 
@@ -288,6 +372,9 @@ function BuildConfigTab({ projectId }: { projectId: string }) {
   const [blackoutWindows, setBlackoutWindows] = useState<BlackoutWindow[]>([]);
   const [savingBlackout, setSavingBlackout] = useState(false);
 
+  const [requireApproval, setRequireApproval] = useState(false);
+  const [savingApproval, setSavingApproval] = useState(false);
+
   useEffect(() => {
     api.get(`/project/${projectId}`).then(res => {
       const d = res.data.data;
@@ -299,16 +386,32 @@ function BuildConfigTab({ projectId }: { projectId: string }) {
       });
       setRegion(d.region || "us-east-1");
       setFailoverRegion(d.failoverRegion || "");
+      setStagingBranch(d.stagingBranch || "");
       setSmokeTestPath(d.smokeTestPath || "");
       setUseDockerfile(Boolean(d.useDockerfile));
       setMaintenanceMode(Boolean(d.maintenanceMode));
       setMaintenanceMessage(d.maintenanceMessage || "");
+      setRequireApproval(Boolean(d.requireApproval));
       setBlackoutWindows(Array.isArray(d.blackoutWindows) ? d.blackoutWindows : []);
       setLoaded(true);
     }).catch(() => setLoaded(true));
 
     api.get("/regions").then(res => setRegions(res.data.regions ?? ["us-east-1"])).catch(() => {});
   }, [projectId]);
+
+  async function toggleRequireApproval() {
+    const next = !requireApproval;
+    setSavingApproval(true);
+    try {
+      await api.patch(`/project/${projectId}`, { requireApproval: next });
+      setRequireApproval(next);
+      toast.success(next ? "Manual approval now required before deploys go live" : "Manual approval disabled — builds auto-promote again");
+    } catch {
+      toast.error("Failed to update approval setting");
+    } finally {
+      setSavingApproval(false);
+    }
+  }
 
   async function toggleMaintenance() {
     const next = !maintenanceMode;
@@ -487,6 +590,45 @@ function BuildConfigTab({ projectId }: { projectId: string }) {
 
       <Card className="p-6 space-y-3 bg-zinc-50/50 dark:bg-zinc-900/50">
         <div>
+          <h2 className="text-base font-semibold">Staging Environment</h2>
+          <p className="text-xs text-zinc-500 mt-1">
+            Pushes to this branch build a persistent staging deployment at{" "}
+            <code className="text-xs bg-zinc-100 dark:bg-zinc-800 px-1 rounded">{"<project>"}-staging</code> —
+            unlike a PR preview it's never torn down, and unlike production it's never
+            auto-promoted. Leave blank to disable.
+          </p>
+        </div>
+        <div className="flex gap-3">
+          <Input
+            value={stagingBranch}
+            onChange={e => setStagingBranch(e.target.value)}
+            placeholder="e.g. staging (disabled)"
+            className="font-mono text-sm"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            className="shrink-0"
+            disabled={savingStagingBranch}
+            onClick={async () => {
+              setSavingStagingBranch(true);
+              try {
+                await api.patch(`/project/${projectId}`, { stagingBranch: stagingBranch.trim() || null });
+                toast.success(stagingBranch.trim() ? `Staging branch set to ${stagingBranch.trim()}` : "Staging disabled");
+              } catch {
+                toast.error("Failed to update staging branch");
+              } finally {
+                setSavingStagingBranch(false);
+              }
+            }}
+          >
+            {savingStagingBranch ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </Card>
+
+      <Card className="p-6 space-y-3 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <div>
           <h2 className="text-base font-semibold">Post-Deploy Smoke Test</h2>
           <p className="text-xs text-zinc-500 mt-1">
             After a build finishes, fetch this path before marking the deployment READY. A
@@ -519,6 +661,22 @@ function BuildConfigTab({ projectId }: { projectId: string }) {
           </div>
           <Button type="button" onClick={toggleDockerfile} disabled={savingDockerfile} variant={useDockerfile ? "default" : "outline"} className="shrink-0">
             {savingDockerfile ? "Saving…" : useDockerfile ? "Enabled" : "Disabled"}
+          </Button>
+        </div>
+      </Card>
+
+      <Card className="p-6 space-y-3 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold">Require Manual Approval</h2>
+            <p className="text-xs text-zinc-500 mt-1">
+              A production build that finishes successfully waits for an admin to approve it before it
+              goes live, instead of auto-promoting. Preview deployments are never gated. Approve or
+              reject from the Deployments list.
+            </p>
+          </div>
+          <Button type="button" onClick={toggleRequireApproval} disabled={savingApproval} variant={requireApproval ? "default" : "outline"} className="shrink-0">
+            {savingApproval ? "Saving…" : requireApproval ? "Enabled" : "Disabled"}
           </Button>
         </div>
       </Card>
@@ -639,6 +797,15 @@ function EdgeRulesTab({ projectId }: { projectId: string }) {
   const [rateLimit, setRateLimit] = useState("");
   const [savingRateLimit, setSavingRateLimit] = useState(false);
 
+  const [botProtectionEnabled, setBotProtectionEnabled] = useState(false);
+  const [blockEmptyUserAgent, setBlockEmptyUserAgent] = useState(false);
+  const [blockedUserAgents, setBlockedUserAgents] = useState("");
+  const [maxBotScore, setMaxBotScore] = useState("");
+  const [savingBotProtection, setSavingBotProtection] = useState(false);
+
+  const [compressionDisabled, setCompressionDisabled] = useState(false);
+  const [savingCompression, setSavingCompression] = useState(false);
+
   useEffect(() => {
     api.get(`/project/${projectId}`).then(res => {
       const d = res.data.data;
@@ -649,9 +816,49 @@ function EdgeRulesTab({ projectId }: { projectId: string }) {
       setGeoMode(geo?.mode ?? "block");
       setGeoCountries((geo?.countries ?? []).join(", "));
       setRateLimit(d.rateLimitPerMinute != null ? String(d.rateLimitPerMinute) : "");
+      const bot = d.botProtection ?? null;
+      setBotProtectionEnabled(bot?.mode === "block");
+      setBlockEmptyUserAgent(Boolean(bot?.blockEmptyUserAgent));
+      setBlockedUserAgents((bot?.blockedUserAgents ?? []).join(", "));
+      setMaxBotScore(bot?.maxBotScore != null ? String(bot.maxBotScore) : "");
+      setCompressionDisabled(d.compressionMode === "disabled");
       setLoaded(true);
     }).catch(() => setLoaded(true));
   }, [projectId]);
+
+  async function saveBotProtection() {
+    setSavingBotProtection(true);
+    try {
+      const botProtection = botProtectionEnabled
+        ? {
+            mode: "block" as const,
+            blockEmptyUserAgent,
+            blockedUserAgents: blockedUserAgents.split(",").map(s => s.trim()).filter(Boolean),
+            ...(maxBotScore.trim() ? { maxBotScore: parseInt(maxBotScore.trim(), 10) } : {}),
+          }
+        : null;
+      await api.patch(`/project/${projectId}`, { botProtection });
+      toast.success(botProtection ? "Bot protection enabled" : "Bot protection disabled");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || "Failed to save bot protection");
+    } finally {
+      setSavingBotProtection(false);
+    }
+  }
+
+  async function toggleCompression() {
+    const next = !compressionDisabled;
+    setSavingCompression(true);
+    try {
+      await api.patch(`/project/${projectId}`, { compressionMode: next ? "disabled" : "auto" });
+      setCompressionDisabled(next);
+      toast.success(next ? "Compression disabled" : "Compression re-enabled");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || "Failed to update compression setting");
+    } finally {
+      setSavingCompression(false);
+    }
+  }
 
   async function saveRedirectRules(next: RedirectRule[]) {
     setSavingRedirects(true);
@@ -889,6 +1096,83 @@ function EdgeRulesTab({ projectId }: { projectId: string }) {
           </Button>
         </div>
       </Card>
+
+      {/* Bot protection */}
+      <Card className="p-6 space-y-3 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <ShieldCheck size={16} className="text-indigo-500" />
+              Bot Protection
+            </h2>
+            <p className="text-xs text-zinc-500 mt-1">
+              Heuristic filtering, not a CAPTCHA — blocks by User-Agent and (on Cloudflare plans with
+              Bot Management) a bot score threshold.
+            </p>
+          </div>
+          <Button type="button" onClick={() => setBotProtectionEnabled(e => !e)} variant={botProtectionEnabled ? "default" : "outline"} className="shrink-0">
+            {botProtectionEnabled ? "Enabled" : "Disabled"}
+          </Button>
+        </div>
+        {botProtectionEnabled && (
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={blockEmptyUserAgent} onChange={e => setBlockEmptyUserAgent(e.target.checked)} className="accent-indigo-500" />
+              Block requests with an empty User-Agent
+            </label>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-zinc-500">Blocked User-Agent substrings (comma-separated)</label>
+              <Input value={blockedUserAgents} onChange={e => setBlockedUserAgents(e.target.value)} placeholder="AhrefsBot, SemrushBot" className="font-mono text-sm" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-zinc-500">Max bot score (1-99, lower = more bot-like — Bot Management plans only)</label>
+              <Input value={maxBotScore} onChange={e => setMaxBotScore(e.target.value)} placeholder="e.g. 10 (disabled)" type="number" min={1} max={99} className="font-mono text-sm" />
+            </div>
+          </div>
+        )}
+        <Button type="button" onClick={saveBotProtection} disabled={savingBotProtection} variant="outline" size="sm">
+          <Save size={13} className="mr-1.5" /> {savingBotProtection ? "Saving…" : "Save"}
+        </Button>
+      </Card>
+
+      {/* Compression control */}
+      <Card className="p-6 space-y-2 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold flex items-center gap-2">
+              <Gauge size={16} className="text-indigo-500" />
+              Response Compression
+            </h2>
+            <p className="text-xs text-zinc-500 mt-1">
+              By default the edge automatically gzip/Brotli-compresses eligible responses. Disable
+              this only for already-compressed or streaming payloads where re-compression wastes
+              CPU or breaks framing.
+            </p>
+          </div>
+          <Button type="button" onClick={toggleCompression} disabled={savingCompression} variant={compressionDisabled ? "destructive" : "outline"} className="shrink-0">
+            {savingCompression ? "Saving…" : compressionDisabled ? "Disabled" : "Auto"}
+          </Button>
+        </div>
+      </Card>
+
+      {/* Image resizing */}
+      <Card className="p-6 space-y-2 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <h2 className="text-base font-semibold flex items-center gap-2">
+          <ImageIcon size={16} className="text-indigo-500" />
+          On-the-Fly Image Resizing
+        </h2>
+        <p className="text-xs text-zinc-500">
+          Any image in this deployment's static assets can be resized at the edge — no config needed here.
+          Reference it from your app as:
+        </p>
+        <code className="block text-xs font-mono bg-zinc-100 dark:bg-zinc-800 px-3 py-2 rounded-lg overflow-x-auto">
+          /_deployr/image?src=/photo.jpg&amp;w=800&amp;q=75&amp;fit=cover
+        </code>
+        <p className="text-xs text-zinc-500">
+          Requires Cloudflare Image Resizing enabled on the zone this worker runs on — without it, the
+          original image is served unresized instead of erroring.
+        </p>
+      </Card>
     </div>
   );
 }
@@ -924,6 +1208,56 @@ function IntegrationsTab({ projectId }: { projectId: string }) {
   const [orgs, setOrgs] = useState<{ id: string; name: string; role: string }[]>([]);
   const [transferTarget, setTransferTarget] = useState("personal");
   const [transferring, setTransferring] = useState(false);
+
+  const [addons, setAddons] = useState<StorageAddon[]>([]);
+  const [newAddonType, setNewAddonType] = useState<StorageAddon["type"]>("postgres");
+  const [newAddonName, setNewAddonName] = useState("");
+  const [newAddonEnvKey, setNewAddonEnvKey] = useState("");
+  const [newAddonConnString, setNewAddonConnString] = useState("");
+  const [creatingAddon, setCreatingAddon] = useState(false);
+
+  const fetchAddons = useCallback(async () => {
+    try {
+      const res = await api.get(`/project/${projectId}/storage-addons`);
+      setAddons(res.data);
+    } catch {
+      // optional feature — fail silently
+    }
+  }, [projectId]);
+
+  useEffect(() => { fetchAddons(); }, [fetchAddons]);
+
+  async function createAddon(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newAddonName.trim() || !newAddonEnvKey.trim() || !newAddonConnString.trim()) return;
+    setCreatingAddon(true);
+    try {
+      await api.post(`/project/${projectId}/storage-addons`, {
+        type: newAddonType,
+        name: newAddonName.trim(),
+        envVarKey: newAddonEnvKey.trim().toUpperCase().replace(/[^A-Z0-9_]/g, ""),
+        connectionString: newAddonConnString.trim(),
+      });
+      toast.success("Storage add-on connected");
+      setNewAddonName(""); setNewAddonEnvKey(""); setNewAddonConnString("");
+      fetchAddons();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error || "Failed to connect storage add-on");
+    } finally {
+      setCreatingAddon(false);
+    }
+  }
+
+  async function removeAddon(addonId: string) {
+    if (!confirm("Remove this storage add-on? Its env var will no longer be injected into builds.")) return;
+    try {
+      await api.delete(`/project/${projectId}/storage-addons/${addonId}`);
+      setAddons((prev) => prev.filter((a) => a.id !== addonId));
+      toast.success("Storage add-on removed");
+    } catch {
+      toast.error("Failed to remove storage add-on");
+    }
+  }
 
   useEffect(() => {
     api.get(`/project/${projectId}`).then(res => {
@@ -1220,6 +1554,64 @@ function IntegrationsTab({ projectId }: { projectId: string }) {
             </form>
           )
         )}
+      </Card>
+
+      {/* Managed storage add-ons */}
+      <Card className="p-6 space-y-4 bg-zinc-50/50 dark:bg-zinc-900/50">
+        <div>
+          <h2 className="text-base font-semibold flex items-center gap-2">
+            <Webhook size={16} className="text-indigo-500" />
+            Managed Storage Add-ons
+          </h2>
+          <p className="text-xs text-zinc-500 mt-1">
+            A persistent Postgres/Redis/KV/blob connection injected into every build (production,
+            preview, and staging alike) — distinct from the ephemeral per-preview databases below.
+            Paste a connection string from your own provider (Neon, Upstash, S3, etc.).
+          </p>
+        </div>
+
+        {addons.length > 0 && (
+          <div className="space-y-2">
+            {addons.map((addon) => (
+              <div key={addon.id} className="flex items-center justify-between text-sm border border-zinc-200 dark:border-zinc-700 rounded-lg px-3 py-2">
+                <div>
+                  <span className="font-medium">{addon.name}</span>
+                  <span className="text-xs text-zinc-400 ml-2">{addon.type} · <code className="font-mono">{addon.envVarKey}</code></span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded ${addon.status === "provisioned" ? "bg-emerald-500/10 text-emerald-600" : "bg-amber-500/10 text-amber-600"}`}>
+                    {addon.status}
+                  </span>
+                  <Button variant="ghost" size="icon" onClick={() => removeAddon(addon.id)} className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 h-7 w-7">
+                    <Trash2 size={13} />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <form onSubmit={createAddon} className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <select
+              value={newAddonType}
+              onChange={(e) => setNewAddonType(e.target.value as StorageAddon["type"])}
+              className="text-sm border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 bg-transparent"
+            >
+              <option value="postgres">Postgres</option>
+              <option value="redis">Redis</option>
+              <option value="kv">KV</option>
+              <option value="blob">Blob storage</option>
+            </select>
+            <Input placeholder="Name" value={newAddonName} onChange={(e) => setNewAddonName(e.target.value)} className="text-sm" />
+            <Input placeholder="ENV_VAR_KEY" value={newAddonEnvKey} onChange={(e) => setNewAddonEnvKey(e.target.value)} className="text-sm font-mono" />
+          </div>
+          <Input type="password" placeholder="Connection string" value={newAddonConnString} onChange={(e) => setNewAddonConnString(e.target.value)} className="font-mono text-sm" />
+          <Button type="submit" disabled={creatingAddon} variant="outline">
+            <Save size={14} className="mr-2" />
+            {creatingAddon ? "Connecting…" : "Connect Add-on"}
+          </Button>
+        </form>
       </Card>
 
       {/* Ephemeral preview databases */}

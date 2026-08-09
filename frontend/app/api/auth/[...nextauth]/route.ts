@@ -39,6 +39,31 @@ const handler = NextAuth({
         return user;
       },
     }),
+
+    // SAML SSO: the /auth/saml/:orgId/acs endpoint validates the IdP's
+    // assertion, then redirects the browser to /auth/sso-callback?code=...
+    // That page calls signIn("sso", { code }), which lands here — this
+    // provider never sees SAML itself, it just exchanges the short-lived
+    // code (server-to-server, with INTERNAL_SECRET) for the user record.
+    Credentials({
+      id: "sso",
+      name: "sso",
+      credentials: { code: {} },
+
+      async authorize(credentials) {
+        const res = await fetch("http://localhost:9000/auth/sso/exchange", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-internal-secret": process.env.INTERNAL_SECRET || "",
+          },
+          body: JSON.stringify({ code: credentials?.code }),
+        });
+
+        if (!res.ok) return null;
+        return res.json();
+      },
+    }),
   ],
 
   callbacks: {

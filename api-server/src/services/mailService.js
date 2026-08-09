@@ -294,6 +294,37 @@ async function sendIncidentEmail(email, { projectName, statusPageUrl, unsubscrib
   });
 }
 
+async function sendDigestEmail(email, { orgName, deployCount, failedCount, activeProjects, budgetAlert, dashboardUrl }) {
+  const safeOrg = escapeHtml(orgName);
+  const content = `
+    <h1>${safeOrg}'s week in review</h1>
+    <div style="display: flex; gap: 16px; margin: 24px 0; flex-wrap: wrap;">
+      <div style="flex: 1; min-width: 120px; background: #f3f4f6; border-radius: 8px; padding: 16px; text-align: center;">
+        <div style="font-size: 28px; font-weight: 700; color: #111827;">${deployCount}</div>
+        <div style="font-size: 12px; color: #6b7280;">deploys</div>
+      </div>
+      <div style="flex: 1; min-width: 120px; background: #f3f4f6; border-radius: 8px; padding: 16px; text-align: center;">
+        <div style="font-size: 28px; font-weight: 700; color: ${failedCount > 0 ? '#dc2626' : '#111827'};">${failedCount}</div>
+        <div style="font-size: 12px; color: #6b7280;">failed builds</div>
+      </div>
+      <div style="flex: 1; min-width: 120px; background: #f3f4f6; border-radius: 8px; padding: 16px; text-align: center;">
+        <div style="font-size: 28px; font-weight: 700; color: #111827;">${activeProjects}</div>
+        <div style="font-size: 12px; color: #6b7280;">active projects</div>
+      </div>
+    </div>
+    ${budgetAlert ? `<p style="color: #d97706; font-size: 14px;">⚠ ${budgetAlert}</p>` : ''}
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${dashboardUrl}" class="button">View Dashboard</a>
+    </div>
+  `;
+
+  await sendEmail({
+    to: email,
+    subject: `${orgName}: last week's deploy activity`,
+    html: wrapHtml('Weekly Digest', `${deployCount} deploys, ${failedCount} failures this week.`, content),
+  });
+}
+
 module.exports = {
   sendOTPEmail,
   sendPasswordResetEmail,
@@ -303,4 +334,5 @@ module.exports = {
   sendPaymentSuccessEmail,
   sendWelcomeEmail,
   sendInvitationEmail,
+  sendDigestEmail,
 };

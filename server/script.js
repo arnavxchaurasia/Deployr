@@ -8,6 +8,7 @@ const mime = require("mime-types");
 const { Kafka } = require("kafkajs");
 const archiver = require("archiver");
 const { scanForSecrets } = require("./secretScanner");
+const { scanForVulnerabilities } = require("./vulnScanner");
 require("dotenv").config();
 
 // -------------------- AWS --------------------
@@ -397,12 +398,49 @@ async function init() {
       const buildEndTime = Date.now();
       const totalBuildTimeMs = buildEndTime - buildStartTime;
 
+      // Bundle size — feeds build-performance-regression detection
+      // (insightsService.js compares this against the previous deployment).
+      // Best-effort: whichever of the static output dir or an SSR framework's
+      // standalone server dir actually exists after this build.
+      function getDirSizeBytes(dirPath) {
+        if (!fs.existsSync(dirPath)) return 0;
+        let total = 0;
+        for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+          const full = path.join(dirPath, entry.name);
+          if (entry.isDirectory()) total += getDirSizeBytes(full);
+          else if (entry.isFile()) total += fs.statSync(full).size;
+        }
+        return total;
+      }
+
+      const bundleDir = ssrFramework?.standaloneDir && fs.existsSync(ssrFramework.standaloneDir)
+        ? ssrFramework.standaloneDir
+        : path.join(workDir, OUTPUT_DIR);
+      const bundleSizeBytes = getDirSizeBytes(bundleDir);
+
+      // Dependency vulnerability scan (OSV.dev, non-blocking — see
+      // vulnScanner.js). Never fails the build; findings surface as AI
+      // Insights recommendations instead of gating the deploy, since a known
+      // CVE in a dependency isn't necessarily exploitable in this context.
+      await publishLog("Checking dependencies for known vulnerabilities...");
+      const vulnerabilities = await scanForVulnerabilities(workDir);
+      if (vulnerabilities.length > 0) {
+        await publishLog(`Found ${vulnerabilities.length} known vulnerability(ies) in dependencies:`);
+        for (const v of vulnerabilities.slice(0, 20)) {
+          await publishLog(`  ${v.name}@${v.version} — ${v.id}: ${v.summary}`);
+        }
+      } else {
+        await publishLog("No known vulnerabilities detected.");
+      }
+
       const aiTelemetry = {
         type: "AI_TELEMETRY",
         dependencies,
         devDependencies,
         totalBuildTimeMs,
-        isNextJs
+        isNextJs,
+        bundleSizeBytes,
+        vulnerabilities: vulnerabilities.slice(0, 20),
       };
 
       await publishLog(`[AI_TELEMETRY] ${JSON.stringify(aiTelemetry)}`);

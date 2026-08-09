@@ -132,6 +132,18 @@ function AuthPageContent() {
     setBanner(null);
     setShowResend(false);
 
+    // If this email's domain has SAML SSO configured, redirect to the IdP
+    // instead of attempting a password login.
+    try {
+      const ssoRes = await api.get("/auth/sso/check", { params: { email } });
+      if (ssoRes.data?.ssoUrl) {
+        window.location.href = ssoRes.data.ssoUrl;
+        return;
+      }
+    } catch {
+      // SSO check failing shouldn't block a normal password login
+    }
+
     const result = await signIn("credentials", {
       email,
       password,

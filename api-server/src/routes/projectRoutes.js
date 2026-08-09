@@ -168,6 +168,7 @@ router.get("/project/:id", authMiddleware, async (req, res) => {
         useDockerfile:   project.useDockerfile,
         maintenanceMode:    project.maintenanceMode,
         maintenanceMessage: project.maintenanceMessage ?? null,
+        requireApproval:    project.requireApproval,
         orgId: project.orgId ?? null,
         previewDbProvisionWebhookUrl: project.previewDbProvisionWebhookUrl ?? null,
         canaryDeploymentId: project.canaryDeploymentId ?? null,
@@ -183,7 +184,10 @@ router.get("/project/:id", authMiddleware, async (req, res) => {
         geoRules:         project.geoRules ?? null,
         rateLimitPerMinute: project.rateLimitPerMinute ?? null,
         failoverRegion:   project.failoverRegion ?? null,
+        stagingBranch:    project.stagingBranch ?? null,
         integrations:     project.integrations ?? {},
+        botProtection:    project.botProtection ?? null,
+        compressionMode:  project.compressionMode ?? 'auto',
       },
     });
   } catch (err) {
@@ -282,8 +286,10 @@ router.get("/project/:id/deployments", authMiddleware, async (req, res) => {
         isPreview: d.isPreview === true,
         previewSubdomain: d.previewSubdomain ?? null,
         previewUrl,
+        awaitingApproval: d.awaitingApproval === true,
+        isStaging: d.isStaging === true,
 
-        canPromote: d.status === "READY" && !d.isActive,
+        canPromote: d.status === "READY" && !d.isActive && !d.awaitingApproval,
         canDelete: true,
         canViewLogs: true,
       };
@@ -698,6 +704,7 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
       useDockerfile:             z.boolean().optional(),
       maintenanceMode:           z.boolean().optional(),
       maintenanceMessage:        z.string().max(500).optional().nullable(),
+      requireApproval:           z.boolean().optional(),
       previewDbProvisionWebhookUrl: z.string().url().optional().nullable(),
       blackoutWindows: z.array(z.object({
         day: z.number().int().min(0).max(6),
@@ -722,6 +729,14 @@ router.patch("/project/:id", authMiddleware, async (req, res) => {
       }).optional().nullable(),
       rateLimitPerMinute: z.number().int().min(1).max(100000).optional().nullable(),
       failoverRegion: z.enum(AVAILABLE_REGIONS).optional().nullable(),
+      botProtection: z.object({
+        mode: z.enum(['off', 'block']),
+        blockEmptyUserAgent: z.boolean().optional(),
+        blockedUserAgents: z.array(z.string().max(200)).max(100).optional(),
+        maxBotScore: z.number().int().min(1).max(99).optional(),
+      }).optional().nullable(),
+      compressionMode: z.enum(['auto', 'disabled']).optional(),
+      stagingBranch: z.string().max(200).optional().nullable(),
     });
 
     const parsed = schema.safeParse(req.body);
@@ -1233,8 +1248,16 @@ async function edgeConfig(projectId) {
       headerRules: true,
       geoRules: true,
       rateLimitPerMinute: true,
+      botProtection: true,
+      compressionMode: true,
     },
   });
+
+  const experiments = await prisma.experiment.findMany({
+    where: { projectId, enabled: true },
+    select: { id: true, key: true, variants: true, goalPath: true },
+  });
+
   return {
     custom404Html: project?.custom404Html ?? null,
     custom500Html: project?.custom500Html ?? null,
@@ -1242,6 +1265,9 @@ async function edgeConfig(projectId) {
     headerRules: project?.headerRules ?? null,
     geoRules: project?.geoRules ?? null,
     rateLimitPerMinute: project?.rateLimitPerMinute ?? null,
+    botProtection: project?.botProtection ?? null,
+    compressionMode: project?.compressionMode ?? 'auto',
+    experiments,
   };
 }
 
@@ -1307,6 +1333,30 @@ router.get("/resolve/:host", async (req, res) => {
           protected: await isProtected(projectId, deployment.isPreview),
           ...(await edgeConfig(projectId)),
         });
+      }
+    }
+
+    // Check staging subdomain (e.g. myapp-staging.deployr.dev) — persistent,
+    // not torn down like PR previews. Always serves the most recent READY
+    // staging build, same "no isActive requirement" model as a preview.
+    if (subdomain.endsWith('-staging')) {
+      const baseSlug = subdomain.slice(0, -'-staging'.length);
+      const stagingProject = await prisma.project.findUnique({ where: { slug: baseSlug } });
+      if (stagingProject) {
+        const stagingDep = await prisma.deployment.findFirst({
+          where: { projectId: stagingProject.id, isStaging: true, status: "READY" },
+          orderBy: { createdAt: "desc" },
+        });
+        if (stagingDep) {
+          return res.json({
+            projectId: stagingProject.id,
+            deploymentId: stagingDep.id,
+            functionUrl: stagingDep.functionUrl,
+            functionUrls: stagingDep.functionUrls || {},
+            protected: await isProtected(stagingProject.id, true),
+            ...(await edgeConfig(stagingProject.id)),
+          });
+        }
       }
     }
 

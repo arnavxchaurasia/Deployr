@@ -5,9 +5,46 @@ async function processTelemetry(projectId, deploymentId, telemetry) {
   try {
     logger.info(`[Build Checks] Analyzing telemetry for deployment ${deploymentId}...`);
     
-    const { dependencies, devDependencies, totalBuildTimeMs, isNextJs } = telemetry;
+    const { dependencies, devDependencies, totalBuildTimeMs, isNextJs, bundleSizeBytes, vulnerabilities } = telemetry;
     const allDeps = { ...dependencies, ...devDependencies };
     const recommendations = [];
+
+    // ----------------------------------------------------
+    // Known dependency vulnerabilities (OSV.dev — see vulnScanner.js)
+    // ----------------------------------------------------
+    for (const v of vulnerabilities || []) {
+      recommendations.push({
+        ruleCode: `VULN_${v.id}`,
+        title: `Known vulnerability in ${v.name}@${v.version}`,
+        explanation: v.summary,
+        recommendation: `Upgrade ${v.name} to a patched version. See https://osv.dev/vulnerability/${v.id} for details.`,
+        severity: 'high',
+        impact: 'security',
+        confidence: 0.9,
+      });
+    }
+
+    // Merge dependency count / bundle size onto this deployment's
+    // DeploymentSignal row (buildTimeMs is written separately, from the
+    // "build complete" log match in kafkaService.js — whichever write lands
+    // first, the other updates the same row rather than creating a second
+    // one, so insightsService.js's "most recent signal for this deployment"
+    // lookup always sees the full picture).
+    const dependencyCount = Object.keys(allDeps).length;
+    const existingSignal = await prisma.deploymentSignal.findFirst({
+      where: { deploymentId },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existingSignal) {
+      await prisma.deploymentSignal.update({
+        where: { id: existingSignal.id },
+        data: { dependencyCount, bundleSizeBytes },
+      });
+    } else {
+      await prisma.deploymentSignal.create({
+        data: { deploymentId, dependencyCount, bundleSizeBytes },
+      });
+    }
 
     // ----------------------------------------------------
     // RULE 1: React Version Upgrade (Performance / Concurrent Mode)
@@ -93,7 +130,7 @@ async function processTelemetry(projectId, deploymentId, telemetry) {
         applied: false
       }));
 
-      await prisma.deploymentRecommendation.createMany({ data });
+      await prisma.deploymentRecommendation.createMany({ data, skipDuplicates: true });
       logger.info(`[AI Engine] Saved ${recommendations.length} insights for ${deploymentId}`);
     }
 

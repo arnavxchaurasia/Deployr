@@ -19,6 +19,9 @@ const { checkBuildQuota } = require('../services/quotaService');
 const { requireProjectAccess, projectAccessWhere } = require('../services/projectAccessService');
 const { cleanupDeployment } = require('../services/deploymentCleanupService');
 const { buildIntegrationEnvVars } = require('../services/integrationsService');
+const { getProjectEnvGroupVars } = require('../services/envGroupService');
+const { getProjectStorageAddonVars } = require('../services/storageAddonService');
+const { rejectApprovedDeployment } = require('../services/kafkaService');
 
 const APP_URL = process.env.APP_URL || 'http://localhost:8000';
 const FRONTEND_URL = process.env.NEXTAUTH_URL || 'http://localhost:3000';
@@ -173,8 +176,15 @@ router.post("/deploy", authMiddleware, async (req, res) => {
       }
     }
 
-    // Generate preview subdomain for non-main branches
-    const isPreview = deployBranch !== "main";
+    // Staging takes precedence over the preview classification — it's a
+    // persistent named branch, not a PR/feature branch.
+    const isStaging = !!project.stagingBranch && deployBranch === project.stagingBranch;
+
+    // Generate preview subdomain for non-main/master branches — matches
+    // deployTriggerService.js's webhook-path classification exactly, so a
+    // "master"-branch project isn't misclassified as a preview when
+    // deployed manually but correctly classified via webhook.
+    const isPreview = !isStaging && deployBranch !== "main" && deployBranch !== "master";
     let previewSubdomain = null;
     if (isPreview) {
       const branchSlug = slugifyBranch(deployBranch);
@@ -195,24 +205,30 @@ router.post("/deploy", authMiddleware, async (req, res) => {
         trigger: "MANUAL",
         startedAt: new Date(),
         isPreview,
+        isStaging,
         previewSubdomain,
       },
     });
 
-    // Filter env vars by environment: "all" always applies; "production"/"preview" per branch
-    const targetEnv = isPreview ? 'preview' : 'production';
+    // Filter env vars by environment: "all" always applies; "production"/"preview"/"staging" per branch
+    const targetEnv = isStaging ? 'staging' : isPreview ? 'preview' : 'production';
     const userEnvVarsObj = {};
     for (const e of project.environmentVariables ?? []) {
       if (e.environment === 'all' || e.environment === targetEnv) {
         userEnvVarsObj[e.key] = decrypt(e.value);
       }
     }
-    // Enabled marketplace connectors (Slack/Sentry/Datadog/...) inject their
-    // own env vars too — a real environment variable with the same key wins.
-    // (snapshot before merging: target and the "restore precedence" source
-    // can't be the same object reference, or the restore is a no-op)
+    // Precedence, lowest to highest: shared EnvGroup vars < marketplace
+    // connector vars (Slack/Sentry/Datadog/...) < this project's own
+    // explicit env vars. (snapshot before merging: target and the "restore
+    // precedence" source can't be the same object reference, or the restore
+    // is a no-op)
     const explicitEnvVars = { ...userEnvVarsObj };
-    Object.assign(userEnvVarsObj, buildIntegrationEnvVars(project.integrations), explicitEnvVars);
+    const [groupEnvVars, storageAddonVars] = await Promise.all([
+      getProjectEnvGroupVars(project.id),
+      getProjectStorageAddonVars(project.id),
+    ]);
+    Object.assign(userEnvVarsObj, groupEnvVars, storageAddonVars, buildIntegrationEnvVars(project.integrations), explicitEnvVars);
 
     const command = new RunTaskCommand({
       cluster: CLUSTER,
@@ -367,7 +383,11 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
       }),
       prisma.deployment.update({
         where: { id: deployment.id },
-        data: { isActive: true },
+        // Also clears the requireApproval hold, if this deployment was
+        // sitting behind one (see kafkaService.js) — manually promoting it
+        // is exactly the approval action, so there's no separate "approve"
+        // endpoint duplicating this.
+        data: { isActive: true, awaitingApproval: false },
       }),
       prisma.project.update({
         where: { id: deployment.projectId },
@@ -383,11 +403,22 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
       }),
     ]);
 
-    logEvent(req.user.id, deployment.isPreview ? 'deployment.promoted' : 'deployment.rolled_back', {
+    logEvent(req.user.id, deployment.awaitingApproval ? 'deployment.approved' : deployment.isPreview ? 'deployment.promoted' : 'deployment.rolled_back', {
       projectId: deployment.projectId,
       projectName: deployment.project.name,
       meta: { deploymentId: deployment.id, branch: deployment.branch },
     });
+
+    if (deployment.awaitingApproval && deployment.project?.notifyWebhookUrl) {
+      sendNotifyWebhook(deployment.project.notifyWebhookUrl, {
+        event: "deployment.succeeded",
+        deploymentId: deployment.id,
+        projectName: deployment.project.name,
+        branch: deployment.branch,
+        trigger: deployment.trigger,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -615,6 +646,27 @@ router.get("/logs/:id/stream", authMiddleware, async (req, res) => {
   }
 
   req.on("close", cleanup);
+});
+
+// POST /deployments/:id/reject — reject a deployment awaiting approval; it
+// never goes live and is marked FAILED.
+router.post("/deployments/:id/reject", authMiddleware, async (req, res) => {
+  try {
+    const deployment = await prisma.deployment.findUnique({ where: { id: req.params.id }, select: { projectId: true } });
+    if (!deployment) return res.status(404).json({ error: "Not found" });
+
+    const access = await requireProjectAccess(req.user.id, deployment.projectId, 'ADMIN');
+    if (!access) return res.status(403).json({ error: "Forbidden" });
+
+    const rejected = await rejectApprovedDeployment(req.params.id);
+    if (!rejected) return res.status(409).json({ error: "This deployment isn't awaiting approval" });
+
+    logEvent(req.user.id, 'deployment.rejected', { projectId: deployment.projectId, meta: { deploymentId: req.params.id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Reject deployment error:", err);
+    res.status(500).json({ error: "Failed to reject deployment" });
+  }
 });
 
 router.get("/deployment/:id", authMiddleware, async (req, res) => {

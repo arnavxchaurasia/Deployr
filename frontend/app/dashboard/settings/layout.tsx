@@ -10,6 +10,7 @@ const tabs = [
   { label: "Billing",  href: "/dashboard/settings/billing" },
   { label: "GitHub",   href: "/dashboard/settings/github" },
   { label: "Team",     href: "/dashboard/settings/team" },
+  { label: "Compliance", href: "/dashboard/settings/compliance" },
 ];
 
 export default function SettingsLayout({

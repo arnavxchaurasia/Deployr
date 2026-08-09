@@ -6,6 +6,7 @@ const { authMiddleware } = require('../middlewares/authMiddleware');
 const { sendInvitationEmail } = require('../services/mailService');
 const { getOrgUsage } = require('../services/usageService');
 const { sendOrgWebhook } = require('../services/orgWebhookService');
+const { streamInvoicePdf } = require('../services/invoiceService');
 
 const router = express.Router();
 
@@ -596,6 +597,16 @@ router.post('/orgs/:id/billing/verify', authMiddleware, async (req, res) => {
       data: { plan: 'PRO', seatsPurchased: memberCount },
     });
 
+    await prisma.invoice.create({
+      data: {
+        orgId: req.params.id,
+        razorpayOrderId: razorpay_order_id,
+        razorpayPaymentId: razorpay_payment_id,
+        amountPaise: Math.max(memberCount, 1) * PRICE_PER_SEAT_PAISE,
+        description: `Deployr Team — ${Math.max(memberCount, 1)} seat(s)`,
+      },
+    }).catch((err) => console.error('Failed to record invoice:', err));
+
     sendOrgWebhook(req.params.id, 'plan.changed', {
       plan: 'PRO',
       seatsPurchased: memberCount,
@@ -606,6 +617,160 @@ router.post('/orgs/:id/billing/verify', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Org billing verify error:', err);
     res.status(500).json({ error: 'Failed to verify payment' });
+  }
+});
+
+// GET /orgs/:id/billing/invoices — this org's seat-purchase history.
+router.get('/orgs/:id/billing/invoices', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const invoices = await prisma.invoice.findMany({
+    where: { orgId: req.params.id },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.json(invoices);
+});
+
+// GET /orgs/:id/billing/invoices/:invoiceId/pdf — downloadable PDF receipt.
+router.get('/orgs/:id/billing/invoices/:invoiceId/pdf', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const invoice = await prisma.invoice.findFirst({
+      where: { id: req.params.invoiceId, orgId: req.params.id },
+    });
+    if (!invoice) return res.status(404).json({ error: 'Not found' });
+
+    const org = await prisma.organization.findUnique({ where: { id: req.params.id }, select: { name: true } });
+    streamInvoicePdf(res, invoice, org?.name || 'Team');
+  } catch (err) {
+    console.error('Org invoice PDF error:', err);
+    res.status(500).json({ error: 'Failed to generate receipt' });
+  }
+});
+
+// ── SAML SSO config ───────────────────────────────────────────────────────────
+
+router.get('/orgs/:id/sso', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const org = await prisma.organization.findUnique({
+    where: { id: req.params.id },
+    select: { samlEnabled: true, samlEntryPoint: true, samlIssuer: true, samlCert: true, ssoDomain: true },
+  });
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+  res.json({
+    ...org,
+    acsUrl: `${process.env.APP_URL || 'http://localhost:8000'}/auth/saml/${req.params.id}/acs`,
+  });
+});
+
+router.post('/orgs/:id/sso', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER');
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const { samlEnabled, samlEntryPoint, samlIssuer, samlCert, ssoDomain } = req.body;
+
+    if (samlEnabled && (!samlEntryPoint || !samlIssuer || !samlCert || !ssoDomain)) {
+      return res.status(400).json({ error: 'entryPoint, issuer, cert, and domain are all required to enable SSO' });
+    }
+    if (ssoDomain && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(ssoDomain)) {
+      return res.status(400).json({ error: 'ssoDomain must be a bare domain, e.g. acme.com' });
+    }
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: {
+        samlEnabled: !!samlEnabled,
+        samlEntryPoint: samlEntryPoint || null,
+        samlIssuer: samlIssuer || null,
+        samlCert: samlCert || null,
+        ssoDomain: ssoDomain ? ssoDomain.toLowerCase() : null,
+      },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    if (err.code === 'P2002') return res.status(409).json({ error: 'That domain is already configured for SSO on another team' });
+    console.error('Save SSO config error:', err);
+    res.status(500).json({ error: 'Failed to save SSO config' });
+  }
+});
+
+// ── Compliance / governance center ────────────────────────────────────────────
+// Ties together SSO status, audit log retention, and a member access review
+// into one view — the pieces already existed separately (SSO, audit logs),
+// this just surfaces them together for an enterprise buyer's compliance
+// checklist, plus adds the one control that was genuinely missing: a
+// configurable audit log retention window (see auditRetentionJob.js).
+
+router.get('/orgs/:id/compliance', authMiddleware, async (req, res) => {
+  const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER', 'ADMIN');
+  if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+  const org = await prisma.organization.findUnique({
+    where: { id: req.params.id },
+    select: {
+      samlEnabled: true,
+      auditLogRetentionDays: true,
+      auditExportWebhookUrl: true,
+      projects: { select: { id: true } },
+      memberships: {
+        select: {
+          role: true,
+          joinedAt: true,
+          user: { select: { id: true, name: true, email: true, loginSessions: { orderBy: { createdAt: 'desc' }, take: 1, select: { createdAt: true } } } },
+        },
+      },
+    },
+  });
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+  const projectIds = org.projects.map((p) => p.id);
+  const auditLogCount = projectIds.length
+    ? await prisma.auditLog.count({ where: { projectId: { in: projectIds } } })
+    : 0;
+
+  res.json({
+    ssoEnabled: org.samlEnabled,
+    auditExportEnabled: !!org.auditExportWebhookUrl,
+    auditLogRetentionDays: org.auditLogRetentionDays,
+    auditLogCount,
+    members: org.memberships.map((m) => ({
+      id: m.user.id,
+      name: m.user.name,
+      email: m.user.email,
+      role: m.role,
+      joinedAt: m.joinedAt,
+      lastLoginAt: m.user.loginSessions[0]?.createdAt ?? null,
+    })),
+  });
+});
+
+router.post('/orgs/:id/compliance', authMiddleware, async (req, res) => {
+  try {
+    const membership = await requireOrgRole(req.params.id, req.user.id, 'OWNER');
+    if (!membership) return res.status(403).json({ error: 'Forbidden' });
+
+    const { auditLogRetentionDays } = req.body;
+    if (auditLogRetentionDays != null && (!Number.isInteger(auditLogRetentionDays) || auditLogRetentionDays < 1 || auditLogRetentionDays > 3650)) {
+      return res.status(400).json({ error: 'auditLogRetentionDays must be an integer between 1 and 3650, or null to disable' });
+    }
+
+    await prisma.organization.update({
+      where: { id: req.params.id },
+      data: { auditLogRetentionDays: auditLogRetentionDays ?? null },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Save compliance config error:', err);
+    res.status(500).json({ error: 'Failed to save compliance settings' });
   }
 });
 

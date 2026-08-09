@@ -40,6 +40,8 @@ type Deployment = {
   canPromote: boolean;
   canDelete: boolean;
   canViewLogs: boolean;
+  awaitingApproval: boolean;
+  isStaging: boolean;
 };
 
 function formatDuration(ms?: number | null) {
@@ -173,6 +175,12 @@ export default function DeploymentsPage() {
 
   async function promote(deploymentId: string) {
     await api.post(`/deployments/${deploymentId}/promote`);
+    fetchDeployments();
+  }
+
+  async function reject(deploymentId: string) {
+    if (!confirm("Reject this deployment? It will never go live and will be marked failed.")) return;
+    await api.post(`/deployments/${deploymentId}/reject`);
     fetchDeployments();
   }
 
@@ -334,6 +342,16 @@ export default function DeploymentsPage() {
                           Preview
                         </span>
                       )}
+                      {dep.awaitingApproval && (
+                        <span className="bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider shrink-0">
+                          Awaiting Approval
+                        </span>
+                      )}
+                      {dep.isStaging && (
+                        <span className="bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider shrink-0">
+                          Staging
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-4 text-xs text-zinc-500 dark:text-zinc-400 flex-wrap">
@@ -398,6 +416,24 @@ export default function DeploymentsPage() {
                           <><RotateCcw size={14} className="mr-1.5" />Rollback to this</>
                         )}
                       </Button>
+                    )}
+
+                    {dep.awaitingApproval && (
+                      <>
+                        <Button
+                          onClick={() => promote(dep.id)}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl h-9 px-3 text-xs font-bold"
+                        >
+                          <Rocket size={14} className="mr-1.5" />Approve & Go Live
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          onClick={() => reject(dep.id)}
+                          className="text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-xl h-9 px-3 text-xs font-semibold"
+                        >
+                          <XCircle size={14} className="mr-1.5" />Reject
+                        </Button>
+                      </>
                     )}
 
                     {dep.canPromote && !canary.deploymentId && (

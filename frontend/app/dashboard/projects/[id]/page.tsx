@@ -30,6 +30,7 @@ import {
   Flag,
   Blocks,
   Users,
+  FlaskConical,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -528,6 +529,24 @@ export default function ProjectPage() {
 
               <Button
                 variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/experiments`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <FlaskConical size={14} className="mr-2 text-indigo-500" />
+                A/B experiments
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/traces`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <GitBranch size={14} className="mr-2 text-indigo-500" />
+                Traces
+              </Button>
+
+              <Button
+                variant="outline"
                 onClick={() => router.push(`/dashboard/projects/${id}/integrations`)}
                 className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
               >
@@ -542,6 +561,15 @@ export default function ProjectPage() {
               >
                 <Users size={14} className="mr-2 text-indigo-500" />
                 Project access
+              </Button>
+
+              <Button
+                variant="outline"
+                onClick={() => router.push(`/dashboard/projects/${id}/request-logs`)}
+                className="w-full justify-start rounded-xl h-11 bg-white/30 dark:bg-white/[0.02] border-zinc-200 dark:border-white/5 hover:bg-zinc-100/50 dark:hover:bg-white/5 text-zinc-700 dark:text-zinc-200 text-xs font-semibold"
+              >
+                <Search size={14} className="mr-2 text-indigo-500" />
+                Request logs
               </Button>
 
               <div className="h-[1px] bg-zinc-250 dark:bg-white/5 my-2" />

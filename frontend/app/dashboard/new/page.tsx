@@ -6,10 +6,50 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-import { Github, FolderGit2, ArrowRight, Sparkles, AlertTriangle, Link as LinkIcon, CheckCircle2, Layers } from "lucide-react";
+import { Github, FolderGit2, ArrowRight, Sparkles, AlertTriangle, Link as LinkIcon, CheckCircle2, Layers, LayoutTemplate } from "lucide-react";
 import Link from "next/link";
 import { z } from "zod";
 import { motion } from "framer-motion";
+
+type Template = { id: string; name: string; description: string; gitURL: string; tag: string };
+
+const TEMPLATES: Template[] = [
+  {
+    id: "next-portfolio",
+    name: "Next.js Portfolio",
+    description: "Vercel's official Next.js App Router portfolio starter.",
+    gitURL: "https://github.com/vercel/nextjs-portfolio-starter",
+    tag: "Next.js",
+  },
+  {
+    id: "next-shadcn",
+    name: "Next.js + shadcn/ui",
+    description: "Next.js with Tailwind CSS and shadcn/ui components pre-configured.",
+    gitURL: "https://github.com/shadcn-ui/next-template",
+    tag: "Next.js",
+  },
+  {
+    id: "svelte",
+    name: "Svelte",
+    description: "The classic minimal Svelte starter template.",
+    gitURL: "https://github.com/sveltejs/template",
+    tag: "Svelte",
+  },
+  {
+    id: "remix-indie",
+    name: "Remix Indie Stack",
+    description: "A full-stack Remix starter with auth and a database ready to go.",
+    gitURL: "https://github.com/remix-run/indie-stack",
+    tag: "Remix",
+  },
+  {
+    id: "static-html",
+    name: "Static HTML5",
+    description: "A dependency-free, framework-agnostic static site boilerplate.",
+    gitURL: "https://github.com/h5bp/html5-boilerplate",
+    tag: "Static",
+  },
+];
 
 export default function NewProjectPage() {
   const { data: session } = useSession();
@@ -22,6 +62,16 @@ export default function NewProjectPage() {
   const [errors, setErrors] = useState<{ name?: string; gitURL?: string }>({});
   const [monorepo, setMonorepo] = useState<{ isMonorepo: boolean; type: string | null } | null>(null);
   const [detectingMonorepo, setDetectingMonorepo] = useState(false);
+
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+
+  function useTemplate(template: Template) {
+    setSelectedTemplateId(template.id);
+    setGitURL(template.gitURL);
+    setName(template.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""));
+    setErrors({});
+    detectFromUrl(template.gitURL);
+  }
 
   async function detectFromUrl(url: string) {
     // Parse owner/repo from a GitHub https URL
@@ -118,6 +168,33 @@ export default function NewProjectPage() {
         <p className="text-zinc-500 dark:text-zinc-400 mt-1.5 text-sm">
           To deploy a new Project, connect an existing Git Repository.
         </p>
+      </div>
+
+      <div className="mb-8">
+        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2 mb-3">
+          <LayoutTemplate size={16} className="text-indigo-500" />
+          Start from a template
+        </h2>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {TEMPLATES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => useTemplate(t)}
+              className={`text-left p-4 rounded-xl border transition-all ${
+                selectedTemplateId === t.id
+                  ? "border-indigo-500 bg-indigo-50 dark:bg-indigo-500/10"
+                  : "border-zinc-200 dark:border-white/10 bg-white/40 dark:bg-zinc-950/40 hover:border-indigo-300"
+              }`}
+            >
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-sm font-semibold text-zinc-900 dark:text-white">{t.name}</span>
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500">{t.tag}</span>
+              </div>
+              <p className="text-xs text-zinc-500 leading-relaxed">{t.description}</p>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-8 items-start">

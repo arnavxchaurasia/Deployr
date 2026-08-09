@@ -146,7 +146,7 @@ async function initKafkaConsumer(io) {
             project: {
               select: {
                 githubOwner: true, githubRepo: true, gitURL: true, slug: true, name: true,
-                notifyWebhookUrl: true, smokeTestPath: true,
+                notifyWebhookUrl: true, smokeTestPath: true, requireApproval: true,
                 user: { select: { id: true, githubToken: true, githubAppInstallationId: true, email: true, name: true } }
               }
             }
@@ -223,14 +223,47 @@ async function initKafkaConsumer(io) {
           });
         }
 
+        // Manual promotion gate — a production build that requires approval
+        // finishes READY but stays off live traffic until an admin approves
+        // it via POST /deployments/:id/approve (see deploymentRoutes.js,
+        // which calls the same promoteDeployment() helper this path uses).
+        const gated = !deployment.isPreview && deployment.project?.requireApproval;
+
         const updated = await prisma.deployment.updateMany({
           where: { id: DEPLOYEMENT_ID, status: { notIn: ["READY", "FAILED"] } },
-          data: { status: "READY", isActive: true, finishedAt },
+          data: gated
+            ? { status: "READY", finishedAt, awaitingApproval: true }
+            : { status: "READY", isActive: true, finishedAt },
         });
 
         if (updated.count === 0) return; // Handled by another consumer instance
 
         publishStatus(DEPLOYEMENT_ID, "READY");
+
+        await prisma.deploymentSignal.create({ data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs } }).catch(() => {});
+
+        if (gated) {
+          if (deployment.project?.user?.id) {
+            notify(deployment.project.user.id, {
+              type: 'deployment.awaiting_approval',
+              title: `${deployment.project.name}: deployment awaiting approval`,
+              body: `Branch ${deployment.branch} built successfully and is ready to go live — an admin needs to approve it first.`,
+              meta: { deploymentId: DEPLOYEMENT_ID, projectId: deployment.projectId },
+            });
+          }
+          if (deployment.project?.notifyWebhookUrl) {
+            sendNotifyWebhook(deployment.project.notifyWebhookUrl, {
+              event: "deployment.awaiting_approval",
+              deploymentId: DEPLOYEMENT_ID,
+              projectName: deployment.project.name,
+              branch: deployment.branch,
+              trigger: deployment.trigger,
+              timestamp: finishedAt.toISOString(),
+            }).catch(() => {});
+          }
+          logger.info(`Deployment built, awaiting approval: ${DEPLOYEMENT_ID}`);
+          return;
+        }
 
         if (deployment.project?.user?.email) {
           const successUrl = `${APP_URL}/?project=${deployment.project.slug}`;
@@ -259,9 +292,6 @@ async function initKafkaConsumer(io) {
         }
 
         await prisma.$transaction([
-          prisma.deploymentSignal.create({
-            data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs },
-          }),
           prisma.deployment.updateMany({
             where: { projectId: deployment.projectId, NOT: { id: DEPLOYEMENT_ID } },
             data: { isActive: false },
@@ -444,4 +474,15 @@ The deployment for branch \`${deployment.branch}\` failed.
   });
 }
 
-module.exports = { initKafkaConsumer };
+// Rejects a READY, awaitingApproval deployment — it never goes live. Marked
+// FAILED so it reads clearly in the deployments list rather than sitting as
+// an ambiguous "READY but not live" forever.
+async function rejectApprovedDeployment(deploymentId) {
+  const result = await prisma.deployment.updateMany({
+    where: { id: deploymentId, status: 'READY', awaitingApproval: true },
+    data: { status: 'FAILED', awaitingApproval: false },
+  });
+  return result.count > 0;
+}
+
+module.exports = { initKafkaConsumer, rejectApprovedDeployment };

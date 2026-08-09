@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CreditCard, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { CreditCard, CheckCircle2, Loader2, XCircle, Download, Receipt } from "lucide-react";
 import Script from "next/script";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
@@ -15,15 +15,44 @@ declare global {
   }
 }
 
+type Forecast = { projected: number; projectedPct: number | null; willExceed: boolean };
+
+type Invoice = {
+  id: string;
+  razorpayPaymentId: string;
+  amountPaise: number;
+  currency: string;
+  description: string;
+  createdAt: string;
+};
+
 export default function BillingPage() {
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [plan, setPlan] = useState<"FREE" | "PRO" | "ENTERPRISE" | null>(null);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [forecast, setForecast] = useState<Forecast | null>(null);
   const router = useRouter();
 
   useEffect(() => {
     api.get("/auth/me").then(res => setPlan(res.data?.plan ?? "FREE")).catch(() => {});
+    api.get("/billing/invoices").then(res => setInvoices(res.data)).catch(() => {});
+    api.get("/usage").then(res => setForecast(res.data?.forecast ?? null)).catch(() => {});
   }, []);
+
+  async function downloadReceipt(invoice: Invoice) {
+    try {
+      const res = await api.get(`/billing/invoices/${invoice.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `deployr-receipt-${invoice.id}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Failed to download receipt");
+    }
+  }
 
   const handleCancel = async () => {
     if (!confirm("Cancel your Pro subscription? You'll immediately move to the Hobby plan.")) return;
@@ -205,6 +234,44 @@ export default function BillingPage() {
             )}
           </Card>
         </div>
+
+        {forecast && forecast.projectedPct != null && forecast.projectedPct > 50 && (
+          <Card className={`p-5 rounded-2xl border backdrop-blur-md ${forecast.willExceed ? "border-amber-500/40 bg-amber-50/50 dark:bg-amber-500/10" : "border-zinc-200/60 dark:border-white/10 bg-white/40 dark:bg-black/40"}`}>
+            <p className="text-sm">
+              At your current pace, you're projected to use{" "}
+              <span className="font-semibold">{forecast.projected} build minutes</span> this month
+              ({forecast.projectedPct}% of your plan).
+              {forecast.willExceed && " You're on track to exceed your quota before the month ends."}
+            </p>
+          </Card>
+        )}
+
+        {invoices.length > 0 && (
+          <Card className="p-6 rounded-2xl border border-zinc-200/60 dark:border-white/10 bg-white/40 dark:bg-black/40 backdrop-blur-md">
+            <h3 className="text-base font-semibold flex items-center gap-2 mb-4">
+              <Receipt size={16} className="text-indigo-500" />
+              Billing history
+            </h3>
+            <div className="divide-y divide-zinc-100 dark:divide-white/5">
+              {invoices.map((inv) => (
+                <div key={inv.id} className="flex items-center justify-between py-3 gap-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-zinc-800 dark:text-zinc-200">{inv.description}</p>
+                    <p className="text-xs text-zinc-400">{new Date(inv.createdAt).toLocaleDateString()}</p>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-sm font-mono text-zinc-600 dark:text-zinc-300">
+                      {inv.currency === "INR" ? "₹" : ""}{(inv.amountPaise / 100).toFixed(2)}
+                    </span>
+                    <Button variant="outline" size="sm" onClick={() => downloadReceipt(inv)} className="gap-1.5">
+                      <Download size={13} /> Receipt
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
       </div>
     </>
   );

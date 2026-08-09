@@ -80,4 +80,32 @@ async function checkBuildQuota({ userId, orgId = null }) {
   return { allowed: used < limit, used, limit, plan };
 }
 
-module.exports = { BUILD_MINUTES_QUOTA, checkBuildQuota, getBuildMinutesUsed, sumBuildMinutes };
+/**
+ * Linear-projects this month's build-minute usage forward from how much has
+ * been used so far and how far into the month we are — a simple
+ * extrapolation (not a trend/seasonality model), meant to warn "at this
+ * rate you'll hit your limit" before the reactive threshold in
+ * budgetAlertJob.js actually fires.
+ *
+ * @param {number} used - build minutes used so far this month
+ * @param {number|null} limit - monthly quota, or null if unlimited
+ * @returns {{ projected: number, projectedPct: number|null, daysElapsed: number, daysInMonth: number, willExceed: boolean }}
+ */
+function forecastMonthlyUsage(used, limit) {
+  const now = new Date();
+  const daysInMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
+  const daysElapsed = Math.max(now.getUTCDate(), 1);
+
+  const dailyRate = used / daysElapsed;
+  const projected = Math.round(dailyRate * daysInMonth * 10) / 10;
+
+  return {
+    projected,
+    projectedPct: limit ? Math.round((projected / limit) * 1000) / 10 : null,
+    daysElapsed,
+    daysInMonth,
+    willExceed: limit != null && projected > limit,
+  };
+}
+
+module.exports = { BUILD_MINUTES_QUOTA, checkBuildQuota, getBuildMinutesUsed, sumBuildMinutes, forecastMonthlyUsage };
