@@ -25,7 +25,7 @@ export function Header() {
       className={clsx(
         "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
         scrolled
-          ? "backdrop-blur-xl bg-[#07070d]/80 border-b border-white/[0.07] shadow-sm"
+          ? "backdrop-blur-xl bg-white/80 dark:bg-zinc-950/80 border-b border-zinc-200 dark:border-zinc-800 shadow-sm"
           : "bg-transparent"
       )}
     >
@@ -35,18 +35,18 @@ export function Header() {
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 to-purple-600 text-white flex items-center justify-center font-bold text-sm shadow-md group-hover:scale-105 transition">
             D
           </div>
-          <span className="text-lg font-semibold tracking-tight">
+          <span className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
             Deployr
           </span>
         </Link>
 
         {/* Right Section */}
         <div className="flex items-center gap-5">
-          <nav className="hidden md:flex items-center gap-8 text-sm text-zinc-500">
-            <Link href="/#features" className="hover:text-white transition">Features</Link>
-            <Link href="/pricing" className="hover:text-white transition">Pricing</Link>
-            <Link href="/about" className="hover:text-white transition">About</Link>
-            <Link href="/contact" className="hover:text-white transition">Contact</Link>
+          <nav className="hidden md:flex items-center gap-8 text-sm text-zinc-600 dark:text-zinc-400">
+            <Link href="/#features" className="hover:text-zinc-900 dark:hover:text-white transition">Features</Link>
+            <Link href="/pricing" className="hover:text-zinc-900 dark:hover:text-white transition">Pricing</Link>
+            <Link href="/about" className="hover:text-zinc-900 dark:hover:text-white transition">About</Link>
+            <Link href="/contact" className="hover:text-zinc-900 dark:hover:text-white transition">Contact</Link>
           </nav>
 
           <ThemeToggle />
