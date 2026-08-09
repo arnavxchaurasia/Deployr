@@ -4,7 +4,7 @@ import Link from "next/link";
 
 export function Footer() {
   return (
-    <footer className="border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950">
+    <footer className="border-t border-white/[0.07] bg-[#07070d]">
       <div className="max-w-7xl mx-auto px-6 py-20 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-12">
 
         {/* Brand */}
@@ -17,7 +17,7 @@ export function Footer() {
               Deployr
             </span>
           </div>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">
+          <p className="text-sm text-zinc-500 leading-relaxed">
             Modern deployment infrastructure powered by Kafka,
             ClickHouse, and distributed systems.
           </p>
@@ -25,22 +25,22 @@ export function Footer() {
 
         {/* Product */}
         <div>
-          <h4 className="font-semibold mb-5 text-sm uppercase tracking-wide text-zinc-800 dark:text-zinc-300">
+          <h4 className="text-[10px] font-mono font-semibold mb-5 uppercase tracking-widest text-zinc-600">
             Product
           </h4>
-          <ul className="space-y-3 text-sm text-zinc-600 dark:text-zinc-400">
+          <ul className="space-y-3 text-sm text-zinc-500">
             <li>
-              <Link href="/dashboard" className="hover:text-indigo-600 transition">
+              <Link href="/dashboard" className="hover:text-white transition">
                 Dashboard
               </Link>
             </li>
             <li>
-              <Link href="/new" className="hover:text-indigo-600 transition">
+              <Link href="/new" className="hover:text-white transition">
                 New Project
               </Link>
             </li>
             <li>
-              <Link href="/activity" className="hover:text-indigo-600 transition">
+              <Link href="/activity" className="hover:text-white transition">
                 Activity
               </Link>
             </li>
@@ -49,22 +49,22 @@ export function Footer() {
 
         {/* Resources */}
         <div>
-          <h4 className="font-semibold mb-5 text-sm uppercase tracking-wide text-zinc-800 dark:text-zinc-300">
+          <h4 className="text-[10px] font-mono font-semibold mb-5 uppercase tracking-widest text-zinc-600">
             Resources
           </h4>
-          <ul className="space-y-3 text-sm text-zinc-600 dark:text-zinc-400">
+          <ul className="space-y-3 text-sm text-zinc-500">
             <li>
-              <Link href="#" className="hover:text-indigo-600 transition">
+              <Link href="#" className="hover:text-white transition">
                 Documentation
               </Link>
             </li>
             <li>
-              <Link href="#" className="hover:text-indigo-600 transition">
+              <Link href="#" className="hover:text-white transition">
                 Public Status
               </Link>
             </li>
             <li>
-              <Link href="#" className="hover:text-indigo-600 transition">
+              <Link href="#" className="hover:text-white transition">
                 Changelog
               </Link>
             </li>
@@ -73,22 +73,22 @@ export function Footer() {
 
         {/* Legal */}
         <div>
-          <h4 className="font-semibold mb-5 text-sm uppercase tracking-wide text-zinc-800 dark:text-zinc-300">
+          <h4 className="text-[10px] font-mono font-semibold mb-5 uppercase tracking-widest text-zinc-600">
             Legal & Support
           </h4>
-          <ul className="space-y-3 text-sm text-zinc-600 dark:text-zinc-400">
+          <ul className="space-y-3 text-sm text-zinc-500">
             <li>
-              <Link href="/privacy" className="hover:text-indigo-600 transition">
+              <Link href="/privacy" className="hover:text-white transition">
                 Privacy Policy
               </Link>
             </li>
             <li>
-              <Link href="/terms" className="hover:text-indigo-600 transition">
+              <Link href="/terms" className="hover:text-white transition">
                 Terms of Service
               </Link>
             </li>
             <li>
-              <Link href="/contact" className="hover:text-indigo-600 transition">
+              <Link href="/contact" className="hover:text-white transition">
                 Contact Us
               </Link>
             </li>
@@ -96,7 +96,7 @@ export function Footer() {
         </div>
       </div>
 
-      <div className="border-t border-zinc-200 dark:border-zinc-800 py-6 text-center text-xs text-zinc-500 dark:text-zinc-400">
+      <div className="border-t border-white/[0.05] py-6 text-center text-xs text-zinc-600">
         © {new Date().getFullYear()} Deployr. All rights reserved.
       </div>
     </footer>

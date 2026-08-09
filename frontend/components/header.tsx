@@ -25,7 +25,7 @@ export function Header() {
       className={clsx(
         "fixed top-0 left-0 right-0 z-50 transition-all duration-300",
         scrolled
-          ? "backdrop-blur-xl bg-white/80 dark:bg-zinc-950/70 border-b border-zinc-200 dark:border-zinc-800 shadow-sm"
+          ? "backdrop-blur-xl bg-[#07070d]/80 border-b border-white/[0.07] shadow-sm"
           : "bg-transparent"
       )}
     >
@@ -42,31 +42,11 @@ export function Header() {
 
         {/* Right Section */}
         <div className="flex items-center gap-5">
-          <nav className="hidden md:flex items-center gap-8 text-sm text-zinc-600 dark:text-zinc-400">
-            <Link
-              href="/#features"
-              className="hover:text-zinc-900 dark:hover:text-white transition"
-            >
-              Features
-            </Link>
-            <Link
-              href="/pricing"
-              className="hover:text-zinc-900 dark:hover:text-white transition"
-            >
-              Pricing
-            </Link>
-            <Link
-              href="/about"
-              className="hover:text-zinc-900 dark:hover:text-white transition"
-            >
-              About
-            </Link>
-            <Link
-              href="/contact"
-              className="hover:text-zinc-900 dark:hover:text-white transition"
-            >
-              Contact
-            </Link>
+          <nav className="hidden md:flex items-center gap-8 text-sm text-zinc-500">
+            <Link href="/#features" className="hover:text-white transition">Features</Link>
+            <Link href="/pricing" className="hover:text-white transition">Pricing</Link>
+            <Link href="/about" className="hover:text-white transition">About</Link>
+            <Link href="/contact" className="hover:text-white transition">Contact</Link>
           </nav>
 
           <ThemeToggle />
@@ -79,7 +59,7 @@ export function Header() {
           ) : (
             <Link
               href="/auth"
-              className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-700 transition shadow-sm"
+              className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm hover:bg-indigo-500 transition shadow-lg shadow-indigo-500/20"
             >
               Sign in
             </Link>
