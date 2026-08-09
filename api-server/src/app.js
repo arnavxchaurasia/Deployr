@@ -20,6 +20,11 @@ const searchRoutes = require("./routes/searchRoutes");
 const featureFlagRoutes = require("./routes/featureFlagRoutes");
 const integrationsRoutes = require("./routes/integrationsRoutes");
 const projectMemberRoutes = require("./routes/projectMemberRoutes");
+const envGroupRoutes = require("./routes/envGroupRoutes");
+const samlRoutes = require("./routes/samlRoutes");
+const experimentRoutes = require("./routes/experimentRoutes");
+const storageAddonRoutes = require("./routes/storageAddonRoutes");
+const traceRoutes = require("./routes/traceRoutes");
 
 const app = express();
 
@@ -69,6 +74,11 @@ app.use("/", searchRoutes);
 app.use("/", featureFlagRoutes);
 app.use("/", integrationsRoutes);
 app.use("/", projectMemberRoutes);
+app.use("/", envGroupRoutes);
+app.use("/", samlRoutes);
+app.use("/", experimentRoutes);
+app.use("/", storageAddonRoutes);
+app.use("/", traceRoutes);
 
 const metricsRoutes = require("./routes/metricsRoutes");
 app.use("/", metricsRoutes);
@@ -81,6 +91,9 @@ app.use("/hooks", hookRoutes);
 
 const { cronRouter } = require("./routes/cronRoutes");
 app.use("/", cronRouter);
+
+const tunnelRoutes = require("./routes/tunnelRoutes");
+app.use("/", tunnelRoutes);
 
 // Sentry error handler must be last, after all routes
 if (process.env.SENTRY_DSN) {

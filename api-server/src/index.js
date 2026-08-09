@@ -23,7 +23,11 @@ const { startUptimeMonitorJob } = require("./jobs/uptimeMonitorJob");
 const { startCanaryHealthJob } = require("./jobs/canaryHealthJob");
 const { startArtifactRetentionJob } = require("./jobs/artifactRetentionJob");
 const { startFailoverJob } = require("./jobs/failoverJob");
+const { startBudgetAlertJob } = require("./jobs/budgetAlertJob");
+const { startDigestJob } = require("./jobs/digestJob");
+const { startAuditRetentionJob } = require("./jobs/auditRetentionJob");
 const { prisma } = require("../lib/prisma");
+const { resolvePendingRequest } = require("./services/tunnelService");
 
 const logger = (() => {
   try { return require('../lib/logger'); } catch { return console; }
@@ -60,6 +64,18 @@ io.on("connection", socket => {
     socket.join(`user:${userId}`);
   });
 
+  // Tunnel: CLI client joins a room so the server can relay HTTP requests to it
+  socket.on("tunnel:join", tunnelId => {
+    if (!tunnelId) return;
+    socket.join(`tunnel:${tunnelId}`);
+    logger.info({ socketId: socket.id, tunnelId }, 'Tunnel client joined');
+  });
+
+  // Tunnel: CLI client sends back the HTTP response to a relayed request
+  socket.on("tunnel:response", ({ requestId, statusCode, headers, bodyBase64 }) => {
+    resolvePendingRequest(requestId, { statusCode, headers, bodyBase64 });
+  });
+
   socket.on("disconnect", () => {
     logger.info({ socketId: socket.id }, 'Socket disconnected');
   });
@@ -82,6 +98,9 @@ startUptimeMonitorJob();
 startCanaryHealthJob();
 startArtifactRetentionJob();
 startFailoverJob();
+startBudgetAlertJob();
+startDigestJob();
+startAuditRetentionJob();
 
 const { startCronExecutor } = require('./services/cronExecutor');
 startCronExecutor();

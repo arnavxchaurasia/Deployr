@@ -460,4 +460,134 @@ envCmd
     console.log('');
   });
 
+// ── deployr dev --tunnel ──────────────────────────────────────────────────────
+
+program
+  .command('dev')
+  .description('Start a local dev tunnel — expose localhost to your Deployr project URL')
+  .option('-p, --port <port>', 'Local port to forward', '3000')
+  .option('--project <projectId>', 'Project ID to associate with this tunnel (optional)')
+  .action(async (opts) => {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      console.error(chalk.red('Not logged in. Run: deployr login'));
+      process.exit(1);
+    }
+
+    const port = parseInt(opts.port, 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      console.error(chalk.red(`Invalid port: ${opts.port}`));
+      process.exit(1);
+    }
+
+    const apiUrl = getApiUrl() || 'http://localhost:9000';
+    const socketUrl = apiUrl.replace(/:\d+$/, `:${process.env.SOCKET_PORT || 9002}`);
+
+    const spinner = ora('Registering tunnel…').start();
+
+    // Register tunnel to get tunnelId
+    let tunnelId, tunnelUrl;
+    try {
+      const res = await fetch(`${apiUrl}/tunnel/register`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: opts.project ?? null }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+      ({ tunnelId, tunnelUrl } = await res.json());
+    } catch (err) {
+      spinner.fail(chalk.red(`Failed to register tunnel: ${err.message}`));
+      process.exit(1);
+    }
+
+    spinner.stop();
+
+    // Dynamically import socket.io-client (ESM compatible)
+    const { io: connectIO } = await import('socket.io-client');
+    const socket = connectIO(socketUrl, {
+      transports: ['websocket'],
+      auth: { token: apiKey },
+    });
+
+    await new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('connect_error', reject);
+    }).catch(err => {
+      console.error(chalk.red(`Socket connection failed: ${err.message}`));
+      process.exit(1);
+    });
+
+    socket.emit('tunnel:join', tunnelId);
+
+    console.log('');
+    console.log(chalk.green.bold('  Tunnel ready'));
+    console.log('');
+    console.log(`  ${chalk.dim('Public URL:')}  ${chalk.cyan(tunnelUrl)}`);
+    console.log(`  ${chalk.dim('Forwarding:')} ${chalk.white(`→ http://localhost:${port}`)}`);
+    console.log('');
+    console.log(chalk.dim('  Incoming requests will appear below. Press Ctrl+C to stop.'));
+    console.log('');
+
+    socket.on('tunnel:request', async ({ requestId, method, path: reqPath, headers, bodyBase64 }) => {
+      const targetUrl = `http://localhost:${port}${reqPath}`;
+      const startMs = Date.now();
+
+      // Forward to local dev server
+      let statusCode = 500;
+      let replyHeaders = {};
+      let replyBodyBase64 = '';
+
+      try {
+        const fetchOpts = {
+          method,
+          headers: { ...headers, host: `localhost:${port}` },
+        };
+        if (bodyBase64) {
+          fetchOpts.body = Buffer.from(bodyBase64, 'base64');
+        }
+
+        const localRes = await fetch(targetUrl, fetchOpts);
+        statusCode = localRes.status;
+
+        // Copy response headers (excluding hop-by-hop)
+        localRes.headers.forEach((value, key) => {
+          if (!['connection', 'keep-alive', 'transfer-encoding', 'te'].includes(key.toLowerCase())) {
+            replyHeaders[key] = value;
+          }
+        });
+
+        const buf = await localRes.arrayBuffer();
+        replyBodyBase64 = Buffer.from(buf).toString('base64');
+      } catch (err) {
+        statusCode = 502;
+        replyHeaders['content-type'] = 'application/json';
+        replyBodyBase64 = Buffer.from(JSON.stringify({ error: `Local server error: ${err.message}` })).toString('base64');
+      }
+
+      socket.emit('tunnel:response', { requestId, statusCode, headers: replyHeaders, bodyBase64: replyBodyBase64 });
+
+      const elapsed = Date.now() - startMs;
+      const statusStr = statusCode < 300 ? chalk.green(statusCode) : statusCode < 400 ? chalk.yellow(statusCode) : chalk.red(statusCode);
+      console.log(`  ${chalk.dim(new Date().toISOString().slice(11, 19))}  ${statusStr}  ${chalk.bold(method.padEnd(6))} ${reqPath}  ${chalk.dim(elapsed + 'ms')}`);
+    });
+
+    socket.on('disconnect', () => {
+      console.log(chalk.yellow('\n  Tunnel disconnected — server closed the connection.'));
+      process.exit(0);
+    });
+
+    // Keep alive until Ctrl+C
+    process.on('SIGINT', () => {
+      console.log(chalk.dim('\n  Closing tunnel…'));
+      socket.disconnect();
+      process.exit(0);
+    });
+
+    // Block the process
+    await new Promise(() => {});
+  });
+
 program.parse(process.argv);
