@@ -98,6 +98,42 @@ router.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // ── Tag push event — deploy on git tag ───────────────────────────────
+    if (payload.object_kind === 'tag_push') {
+      const tagName = (payload.ref || '').replace('refs/tags/', '');
+      const commitHash = payload.after;
+
+      if (!tagName || !/^[a-zA-Z0-9._\-/]+$/.test(tagName)) {
+        logger.warn(`[GitLab Webhook] Rejecting invalid tag: ${tagName}`);
+        return res.sendStatus(200);
+      }
+
+      for (const project of projects) {
+        const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+        if (!quota.allowed) {
+          logger.info(`[GitLab Webhook] Tag push skipped — build-minute quota exceeded for ${project.name}`);
+          continue;
+        }
+
+        const blackout = checkBlackout(project);
+        if (blackout.blocked) {
+          logger.info(`[GitLab Webhook] Tag push skipped — blackout window active for ${project.name}`);
+          continue;
+        }
+
+        await triggerECSBuild({ project, branch: tagName, commitHash, trigger: 'GH_PUSH' });
+        logger.info(`[GitLab Webhook] Tag push → deploy triggered for ${project.name} (tag: ${tagName})`);
+
+        getIO().to(`user:${project.userId}`).emit('github_tag_deployed', {
+          projectId: project.id,
+          projectName: project.name,
+          tag: tagName,
+        });
+      }
+
+      return res.sendStatus(200);
+    }
+
     // ── Merge request event → preview deployment ─────────────────────────
     if (payload.object_kind === 'merge_request') {
       const attrs = payload.object_attributes;

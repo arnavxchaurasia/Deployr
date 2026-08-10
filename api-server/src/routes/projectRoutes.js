@@ -1445,6 +1445,26 @@ router.post("/project/:id/deploy-hook", authMiddleware, async (req, res) => {
   res.json({ hookUrl });
 });
 
+// POST /project/:id/regenerate-hook-token — rotate the deploy hook secret
+// without deleting and re-creating the hook. ADMIN access required (same as
+// creating the hook in the first place).
+router.post("/project/:id/regenerate-hook-token", authMiddleware, async (req, res) => {
+  const project = await prisma.project.findFirst({
+    where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'ADMIN') },
+  });
+  if (!project) return res.status(403).json({ error: "Forbidden" });
+
+  const token = crypto.randomBytes(24).toString("hex");
+  const updated = await prisma.project.update({
+    where: { id: project.id },
+    data: { deployHookToken: token },
+    select: { deployHookToken: true },
+  });
+
+  logEvent(req.user.id, 'deploy_hook.regenerated', { projectId: project.id });
+  res.json({ deployHookToken: updated.deployHookToken });
+});
+
 router.delete("/project/:id/deploy-hook", authMiddleware, async (req, res) => {
   const project = await prisma.project.findFirst({
     where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'ADMIN') },

@@ -522,7 +522,8 @@ model Deployment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  logs LogEvent[]
+  logs        LogEvent[]
+  annotations DeploymentAnnotation[]
 
   @@index([projectId])
 }
@@ -991,5 +992,19 @@ model SecretScanResult {
   createdAt DateTime @default(now())
 
   @@index([projectId])
+  @@index([deploymentId])
+}
+
+model DeploymentAnnotation {
+  id           String     @id @default(cuid())
+  deploymentId String     @map("deployment_id")
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  userId       String     @map("user_id")
+
+  note String
+  tag  String? // e.g. "hotfix", "release", "rollback"
+
+  createdAt DateTime @default(now())
+
   @@index([deploymentId])
 }

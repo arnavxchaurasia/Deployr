@@ -243,6 +243,41 @@ router.post("/webhook", async (req, res) => {
 
     // ── PUSH event — deploy all branches (main → production, others → preview) ─
     if (payload.ref) {
+      // ── TAG push — deploy on git tag ──────────────────────────────────────
+      if (payload.ref.startsWith('refs/tags/')) {
+        const tagName = payload.ref.replace('refs/tags/', '');
+        const commitHash = payload.after;
+
+        for (const project of projects) {
+          const quota = await checkBuildQuota({ userId: project.userId, orgId: project.orgId });
+          if (!quota.allowed) {
+            logger.info(`[Webhook] Tag push skipped — build-minute quota exceeded for ${project.name} (${quota.used.toFixed(1)}/${quota.limit} min)`);
+            continue;
+          }
+
+          const blackout = checkBlackout(project);
+          if (blackout.blocked) {
+            logger.info(`[Webhook] Tag push skipped — blackout window active for ${project.name}`);
+            continue;
+          }
+
+          const tagDeployment = await triggerECSBuild({ project, branch: tagName, commitHash, trigger: 'GH_PUSH' });
+          logger.info(`[Webhook] Tag push → deploy triggered for ${project.name} (tag: ${tagName})`);
+          notifyCommitStatus(project, commitHash, 'pending', {
+            targetUrl: `${FRONTEND_URL}/dashboard/logs/${tagDeployment.id}`,
+            description: 'Deployr build in progress',
+          });
+
+          getIO().to(`user:${project.userId}`).emit('github_tag_deployed', {
+            projectId: project.id,
+            projectName: project.name,
+            tag: tagName,
+          });
+        }
+
+        return res.sendStatus(200);
+      }
+
       const branch = payload.ref.replace("refs/heads/", "");
       const commitHash = payload.head_commit?.id;
       const isDefaultBranch = branch === 'main' || branch === 'master';

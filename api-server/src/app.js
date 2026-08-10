@@ -125,6 +125,18 @@ app.use("/", encryptionRoutes);
 const dbBranchingRoutes = require("./routes/dbBranchingRoutes");
 app.use("/", dbBranchingRoutes);
 
+const annotationRoutes = require("./routes/annotationRoutes");
+app.use("/", annotationRoutes);
+
+const envImportRoutes = require("./routes/envImportRoutes");
+app.use("/", envImportRoutes);
+
+const deployConfigRoutes = require("./routes/deployConfigRoutes");
+app.use("/", deployConfigRoutes);
+
+const deploymentDiffRoutes = require("./routes/deploymentDiffRoutes");
+app.use("/", deploymentDiffRoutes);
+
 // Sentry error handler must be last, after all routes
 if (process.env.SENTRY_DSN) {
   try {
