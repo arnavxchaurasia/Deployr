@@ -53,4 +53,15 @@ function buildIntegrationEnvVars(integrations) {
   return env;
 }
 
-module.exports = { CONNECTORS, listConnectors, getConnector, buildIntegrationEnvVars };
+const { prisma } = require('../../lib/prisma');
+
+async function getProjectSlackWebhook(projectId) {
+  // Look up Slack integration for this project's org or user
+  // The Integration model has: projectId (optional), orgId (optional), type, config (JSON with webhookUrl)
+  const integration = await prisma.integration.findFirst({
+    where: { type: 'slack', OR: [{ projectId }, { project: { id: projectId } }] },
+  });
+  return integration?.config?.webhookUrl || null;
+}
+
+module.exports = { CONNECTORS, listConnectors, getConnector, buildIntegrationEnvVars, getProjectSlackWebhook };

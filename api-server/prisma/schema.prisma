@@ -431,6 +431,21 @@ model Project {
   statusSubscribers    StatusSubscriber[]
   memberOverrides      ProjectMemberOverride[]
   envGroupLinks        ProjectEnvGroup[]
+  edgeFunctions        EdgeFunction[]
+  alertRules           AlertRule[]
+  logRetentionPolicy   LogRetentionPolicy?
+  ipAllowlist          IpAllowlistEntry[]
+  buildCaches          BuildCache[]
+  secretScanResults    SecretScanResult[]
+
+  // Monorepo: only build from this sub-directory (e.g. "apps/web")
+  monorepoRoot  String? @map("monorepo_root")
+  // Database branching: spin up an ephemeral DB branch per preview via previewDbProvisionWebhookUrl
+  dbBranchingEnabled Boolean @default(false) @map("db_branching_enabled")
+  // KMS key ID for env var encryption rotation
+  kmsKeyId String? @map("kms_key_id")
+  // IP allowlisting toggle — when true, only requests from allowlisted CIDRs are served
+  ipAllowlistEnabled Boolean @default(false) @map("ip_allowlist_enabled")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -493,6 +508,12 @@ model Deployment {
   previewSubdomain String? @unique @map("preview_subdomain")
 
   prNumber Int?
+
+  // PR comment posted to GitHub/GitLab when preview becomes READY — stored
+  // so subsequent re-deploys update the same comment rather than posting new ones.
+  prCommentId String? @map("pr_comment_id")
+  // Whether install step was served from build cache (metrics/UX only)
+  buildCacheHit Boolean @default(false) @map("build_cache_hit")
 
   // Denormalized from the project's region at trigger time, so a project's
   // region change doesn't retroactively relabel past deployments.
@@ -859,4 +880,116 @@ model CronJob {
   updatedAt  DateTime @updatedAt
 
   @@index([projectId])
+}
+
+model EdgeFunction {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name    String
+  // URL path pattern this function intercepts, e.g. "/api/auth/*"
+  route   String
+  code    String  @db.Text
+  runtime String  @default("js")
+  enabled Boolean @default(true)
+
+  lastDeployedAt DateTime? @map("last_deployed_at")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model AlertRule {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  name    String
+  // "uptime" | "error_rate" | "build_failure" | "deploy_duration_ms"
+  metric  String
+  // Threshold that triggers the alert (e.g. 99.9 for uptime %, 5.0 for error rate %)
+  threshold Float
+  // JSON array: [{ type: "email", address: "..." }, { type: "slack", webhookUrl: "..." }, { type: "pagerduty", routingKey: "..." }]
+  channels  Json    @default("[]")
+  enabled   Boolean @default(true)
+
+  lastFiredAt DateTime? @map("last_fired_at")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId])
+}
+
+model LogRetentionPolicy {
+  id        String  @id @default(cuid())
+  projectId String  @unique
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  retentionDays  Int     @default(30)    @map("retention_days")
+  archiveEnabled Boolean @default(false) @map("archive_enabled")
+  // S3/GCS bucket to archive logs to before deletion
+  archiveBucket  String? @map("archive_bucket")
+  archiveRegion  String? @map("archive_region")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model IpAllowlistEntry {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  cidr        String
+  description String?
+  enabled     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, cidr])
+  @@index([projectId])
+}
+
+model BuildCache {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  // SHA-256 of lockfile contents + Node version — cache is busted on either change
+  cacheKey  String @map("cache_key")
+  s3Key     String @map("s3_key")
+  sizeBytes BigInt @map("size_bytes")
+  hitCount  Int    @default(0) @map("hit_count")
+
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
+  createdAt  DateTime @default(now())
+
+  @@unique([projectId, cacheKey])
+  @@index([projectId])
+}
+
+model SecretScanResult {
+  id           String  @id @default(cuid())
+  projectId    String
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deploymentId String? @map("deployment_id")
+
+  severity String  // "high" | "medium" | "low"
+  ruleId   String  @map("rule_id")
+  // Redacted match — never stores the actual secret value
+  redacted String
+  location String  // e.g. "env_var:DATABASE_URL" | "source:src/config.ts:14"
+  blocked  Boolean @default(false)
+
+  resolvedAt DateTime? @map("resolved_at")
+
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@index([deploymentId])
 }

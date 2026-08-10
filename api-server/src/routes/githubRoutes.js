@@ -339,6 +339,23 @@ router.post("/webhook", async (req, res) => {
           targetUrl: `${FRONTEND_URL}/dashboard/logs/${deployment.id}`,
           description: 'Deployr build in progress',
         });
+
+        // Post "Deploy in progress" comment to the PR
+        try {
+          const { Octokit } = await import('@octokit/rest');
+          const octokit = new Octokit({ auth: project.user?.githubToken });
+          const comment = await octokit.rest.issues.createComment({
+            owner: payload.repository.owner.login,
+            repo: payload.repository.name,
+            issue_number: pr.number,
+            body: `🚀 **Deployr** is building a preview for this PR...\n\nDeployment ID: \`${deployment.id}\``,
+          });
+          // Store the comment ID so we can update it when deploy finishes
+          await prisma.deployment.update({
+            where: { id: deployment.id },
+            data: { prCommentId: String(comment.data.id) },
+          });
+        } catch (e) { /* non-fatal */ }
       }
 
       return res.sendStatus(200);

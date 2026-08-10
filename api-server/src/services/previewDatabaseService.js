@@ -1,5 +1,13 @@
 'use strict';
 
+/**
+ * DB Branching — when project.dbBranchingEnabled is true and
+ * project.previewDbProvisionWebhookUrl is set, every preview deployment
+ * automatically gets an ephemeral database branch provisioned via the webhook.
+ * The webhook must return { envVar, value } which is injected into the build's
+ * environment. On teardown the same webhook is called with action:'destroy'.
+ */
+
 const https = require('https');
 const http = require('http');
 const logger = require('../../lib/logger');
@@ -78,4 +86,33 @@ async function destroyPreviewDatabase(webhookUrl, { projectId, deploymentId }) {
   }
 }
 
-module.exports = { provisionPreviewDatabase, destroyPreviewDatabase };
+/**
+ * Returns true when a project should have an ephemeral DB branch created for
+ * every preview deployment — both the feature flag and a webhook URL must be
+ * present, otherwise there is nowhere to send the provisioning request.
+ */
+function shouldBranchDatabase(project) {
+  return !!(project && project.dbBranchingEnabled && project.previewDbProvisionWebhookUrl);
+}
+
+/**
+ * branchDatabase — named alias for provisionPreviewDatabase, used by the
+ * automatic DB-branching path so call-sites read more clearly.
+ *
+ * @param {object} project  — must include id and previewDbProvisionWebhookUrl
+ * @param {object} deployment — must include id and branch
+ */
+async function branchDatabase(project, deployment) {
+  return provisionPreviewDatabase(project.previewDbProvisionWebhookUrl, {
+    projectId:    project.id,
+    deploymentId: deployment.id,
+    branch:       deployment.branch,
+  });
+}
+
+module.exports = {
+  provisionPreviewDatabase,
+  destroyPreviewDatabase,
+  shouldBranchDatabase,
+  branchDatabase,
+};

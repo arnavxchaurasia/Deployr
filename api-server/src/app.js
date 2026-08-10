@@ -95,6 +95,36 @@ app.use("/", cronRouter);
 const tunnelRoutes = require("./routes/tunnelRoutes");
 app.use("/", tunnelRoutes);
 
+const domainRoutes = require("./routes/domainRoutes");
+app.use("/", domainRoutes);
+
+const edgeFunctionRoutes = require("./routes/edgeFunctionRoutes");
+app.use("/", edgeFunctionRoutes);
+
+const alertRuleRoutes = require("./routes/alertRuleRoutes");
+app.use("/", alertRuleRoutes);
+
+const logRetentionRoutes = require("./routes/logRetentionRoutes");
+app.use("/", logRetentionRoutes);
+
+const ipAllowlistRoutes = require("./routes/ipAllowlistRoutes");
+app.use("/", ipAllowlistRoutes);
+
+const buildCacheRoutes = require("./routes/buildCacheRoutes");
+app.use("/", buildCacheRoutes);
+
+const secretScanRoutes = require("./routes/secretScanRoutes");
+app.use("/", secretScanRoutes);
+
+const monorepoRoutes = require("./routes/monorepoRoutes");
+app.use("/", monorepoRoutes);
+
+const encryptionRoutes = require("./routes/encryptionRoutes");
+app.use("/", encryptionRoutes);
+
+const dbBranchingRoutes = require("./routes/dbBranchingRoutes");
+app.use("/", dbBranchingRoutes);
+
 // Sentry error handler must be last, after all routes
 if (process.env.SENTRY_DSN) {
   try {

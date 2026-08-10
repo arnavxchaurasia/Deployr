@@ -193,7 +193,14 @@ program
   .description('Trigger a deployment and wait for it to finish')
   .option('-b, --branch <branch>', 'Branch to deploy (default: main)')
   .option('--prebuilt <dir>', 'Deploy a local prebuilt directory directly — skips git entirely, no build step')
+  .option('--project <slug>', 'Project slug (alternative to positional <projectId>)')
+  .option('--dir <path>', 'Directory to deploy (alias for --prebuilt)', '.')
   .action(async (projectId, opts) => {
+    // --project overrides the positional argument; --dir aliases --prebuilt
+    if (opts.project) projectId = opts.project;
+    if (!opts.prebuilt && opts.dir && opts.dir !== '.') opts.prebuilt = opts.dir;
+    // If --dir . was explicitly given alongside no --prebuilt, treat cwd as prebuilt source
+    if (!opts.prebuilt && opts.dir === '.' && process.argv.includes('--dir')) opts.prebuilt = opts.dir;
     console.log('');
 
     let deploymentId;

@@ -92,6 +92,45 @@ router.post("/internal/deployments/:id/status", async (req, res) => {
       }).catch(() => {});
     }
 
+    // Real-time Slack notification via integrations
+    if (status === 'READY' || status === 'FAILED') {
+      try {
+        const { getProjectSlackWebhook } = require('../services/integrationsService');
+        const slackWebhookUrl = await getProjectSlackWebhook(project.id);
+        if (slackWebhookUrl) {
+          const emoji = status === 'READY' ? '✅' : '❌';
+          const text = status === 'READY'
+            ? `${emoji} *${project.name}* deployed successfully`
+            : `${emoji} *${project.name}* deployment failed`;
+          await fetch(slackWebhookUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, username: 'Deployr', icon_emoji: ':rocket:' }),
+          }).catch(() => {});
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
+    // Update PR comment with live preview URL
+    if ((status === 'READY' || status === 'FAILED') && deployment.prCommentId && deployment.prNumber) {
+      try {
+        const { Octokit } = await import('@octokit/rest');
+        const octokit = new Octokit({ auth: deployment.project?.user?.githubToken });
+        const previewUrl = deployment.previewSubdomain
+          ? `https://${deployment.previewSubdomain}.${process.env.BASE_DOMAIN || 'deployr.app'}`
+          : deployment.functionUrl;
+        const body = status === 'READY'
+          ? `✅ **Preview ready**: [${previewUrl}](${previewUrl})\n\nBranch: \`${deployment.branch}\` · Deployment: \`${deployment.id.slice(0, 8)}\``
+          : `❌ **Preview build failed** for branch \`${deployment.branch}\`\n\n[View logs](${process.env.NEXTAUTH_URL}/dashboard/logs/${deployment.id})`;
+        await octokit.rest.issues.updateComment({
+          owner: deployment.project.githubOwner,
+          repo: deployment.project.githubRepo,
+          comment_id: parseInt(deployment.prCommentId),
+          body,
+        });
+      } catch (e) { /* non-fatal */ }
+    }
+
     res.json({ success: true, data: deployment });
   } catch (err) {
     console.error("Status update error:", err);
