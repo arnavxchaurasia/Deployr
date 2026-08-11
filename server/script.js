@@ -55,16 +55,30 @@ if (!/^[a-zA-Z0-9._\-/]+$/.test(BRANCH)) {
 }
 
 // -------------------- KAFKA --------------------
+const KAFKA_BROKER = process.env.KAFKA_BROKER || "kafka-26f06e40-notesxmait-c472.j.aivencloud.com:20310";
+
+function readKafkaCert(envVar, certFile) {
+  if (process.env[envVar]) return process.env[envVar];
+  const filePath = path.join(__dirname, "kafka-certs", certFile);
+  if (fs.existsSync(filePath)) return fs.readFileSync(filePath);
+  return undefined;
+}
+
+const kafkaSslConfig = (() => {
+  const ca = readKafkaCert("KAFKA_CA_CERT", "ca.pem");
+  const cert = readKafkaCert("KAFKA_SERVICE_CERT", "service.cert");
+  const key = readKafkaCert("KAFKA_SERVICE_KEY", "service.key");
+  if (!ca || !cert || !key) {
+    console.warn("⚠️  Kafka TLS certs not found — connecting without SSL (local dev only)");
+    return false;
+  }
+  return { rejectUnauthorized: true, ca: [ca], cert, key, servername: KAFKA_BROKER.split(":")[0] };
+})();
+
 const kafka = new Kafka({
   clientId: `docker-build-server-${DEPLOYEMENT_ID}`,
-  brokers: ["kafka-26f06e40-notesxmait-c472.j.aivencloud.com:20310"],
-  ssl: {
-    rejectUnauthorized: true,
-    ca: [fs.readFileSync(path.join(__dirname, "kafka-certs/ca.pem"))],
-    cert: fs.readFileSync(path.join(__dirname, "kafka-certs/service.cert")),
-    key: fs.readFileSync(path.join(__dirname, "kafka-certs/service.key")),
-    servername: "kafka-26f06e40-notesxmait-c472.j.aivencloud.com",
-  },
+  brokers: [KAFKA_BROKER],
+  ssl: kafkaSslConfig,
   connectionTimeout: 15000,
   requestTimeout: 30000,
 });

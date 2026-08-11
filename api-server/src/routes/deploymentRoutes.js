@@ -18,6 +18,7 @@ const { subscribe } = require('../utils/logBus');
 const { checkBuildQuota } = require('../services/quotaService');
 const { requireProjectAccess, projectAccessWhere } = require('../services/projectAccessService');
 const { cleanupDeployment } = require('../services/deploymentCleanupService');
+const { writeProjectKV } = require('../services/cloudflareService');
 const { buildIntegrationEnvVars } = require('../services/integrationsService');
 const { getProjectEnvGroupVars } = require('../services/envGroupService');
 const { getProjectStorageAddonVars } = require('../services/storageAddonService');
@@ -447,6 +448,19 @@ router.post("/deployments/:id/promote", authMiddleware, async (req, res) => {
       projectName: deployment.project.name,
       meta: { deploymentId: deployment.id, branch: deployment.branch },
     });
+
+    // Update CF KV so edge routing resolves to this deployment immediately
+    const kvSubdomain = deployment.isPreview && deployment.previewSubdomain
+      ? deployment.previewSubdomain
+      : deployment.project?.slug;
+    if (kvSubdomain) {
+      writeProjectKV(kvSubdomain, {
+        projectId: deployment.projectId,
+        deploymentId: deployment.id,
+        lambdaUrl: deployment.functionUrl || null,
+        s3Prefix: `__outputs/${deployment.projectId}/${deployment.id}`,
+      }).catch(() => {});
+    }
 
     if (deployment.awaitingApproval && deployment.project?.notifyWebhookUrl) {
       sendNotifyWebhook(deployment.project.notifyWebhookUrl, {

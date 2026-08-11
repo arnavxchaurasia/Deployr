@@ -5,6 +5,8 @@ const https = require('https');
 const CF_API_HOST = 'api.cloudflare.com';
 const CF_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 const CF_ZONE_ID = process.env.CLOUDFLARE_ZONE_ID;
+const CF_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const CF_KV_NAMESPACE_ID = process.env.CLOUDFLARE_KV_NAMESPACE_ID;
 // Hostname pointing at the platform's edge (Cloudflare Worker route / origin)
 // that customers CNAME their custom domain to.
 const CF_FALLBACK_ORIGIN = process.env.CLOUDFLARE_FALLBACK_ORIGIN;
@@ -137,11 +139,51 @@ async function purgeUrls(urls) {
   }
 }
 
+/**
+ * Write a project routing entry to the Workers KV store.
+ * The Cloudflare Worker reads this to resolve subdomain → deployment.
+ *
+ * @param {string} subdomain - e.g. "myapp" or "myapp-pr-42"
+ * @param {{ projectId: string, deploymentId: string, lambdaUrl?: string, s3Prefix: string }} entry
+ */
+async function writeProjectKV(subdomain, entry) {
+  if (!CF_API_TOKEN || !CF_ACCOUNT_ID || !CF_KV_NAMESPACE_ID) return false;
+  try {
+    const { statusCode } = await cfRequest(
+      `/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_KV_NAMESPACE_ID}/values/${encodeURIComponent(subdomain)}`,
+      { method: 'PUT' },
+      entry
+    );
+    return statusCode === 200;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete a project routing entry from Workers KV (called when a deployment is
+ * deleted or a preview subdomain is reclaimed).
+ */
+async function deleteProjectKV(subdomain) {
+  if (!CF_API_TOKEN || !CF_ACCOUNT_ID || !CF_KV_NAMESPACE_ID) return false;
+  try {
+    const { statusCode } = await cfRequest(
+      `/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_KV_NAMESPACE_ID}/values/${encodeURIComponent(subdomain)}`,
+      { method: 'DELETE' }
+    );
+    return statusCode === 200;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   isConfigured,
   createCustomHostname,
   getCustomHostnameStatus,
   deleteCustomHostname,
   purgeUrls,
+  writeProjectKV,
+  deleteProjectKV,
   CF_FALLBACK_ORIGIN,
 };

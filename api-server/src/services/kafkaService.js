@@ -12,6 +12,7 @@ const { sendNotifyWebhook } = require("./notifyWebhookService");
 const mailService = require("./mailService");
 const { runSmokeTest } = require("./smokeTestService");
 const { notify } = require("./notificationService");
+const { writeProjectKV } = require("./cloudflareService");
 
 const APP_URL = process.env.APP_URL || 'http://localhost:8000';
 const FRONTEND_URL = process.env.NEXTAUTH_URL || 'http://localhost:3000';
@@ -239,6 +240,22 @@ async function initKafkaConsumer(io) {
         if (updated.count === 0) return; // Handled by another consumer instance
 
         publishStatus(DEPLOYEMENT_ID, "READY");
+
+        // Populate Cloudflare Worker KV so edge routing resolves subdomain → deployment.
+        // Only for non-gated deployments — gated ones aren't live yet.
+        if (!gated) {
+          const subdomain = deployment.isPreview && deployment.previewSubdomain
+            ? deployment.previewSubdomain
+            : deployment.project?.slug;
+          if (subdomain) {
+            writeProjectKV(subdomain, {
+              projectId: deployment.projectId,
+              deploymentId: DEPLOYEMENT_ID,
+              lambdaUrl: deployment.functionUrl || null,
+              s3Prefix: `__outputs/${deployment.projectId}/${DEPLOYEMENT_ID}`,
+            }).catch(() => {});
+          }
+        }
 
         await prisma.deploymentSignal.create({ data: { deploymentId: DEPLOYEMENT_ID, buildTimeMs } }).catch(() => {});
 

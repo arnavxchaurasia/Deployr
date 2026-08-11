@@ -26,6 +26,7 @@ const { startFailoverJob } = require("./jobs/failoverJob");
 const { startBudgetAlertJob } = require("./jobs/budgetAlertJob");
 const { startDigestJob } = require("./jobs/digestJob");
 const { startAuditRetentionJob } = require("./jobs/auditRetentionJob");
+const { startLogEventRetentionJob } = require("./jobs/logEventRetentionJob");
 const { prisma } = require("../lib/prisma");
 const { resolvePendingRequest } = require("./services/tunnelService");
 
@@ -101,6 +102,7 @@ startFailoverJob();
 startBudgetAlertJob();
 startDigestJob();
 startAuditRetentionJob();
+startLogEventRetentionJob();
 
 const { startCronExecutor } = require('./services/cronExecutor');
 startCronExecutor();

@@ -3,8 +3,18 @@ main = "src/index.js"
 compatibility_date = "2023-10-30"
 
 [vars]
-API_BASE = "https://api.deployr.xyz"
-# PREVIEW_PROTECTION_SECRET is a secret, not a plaintext var — set it with:
+API_BASE = "https://api.deployr.dev"  # Replace with actual API domain
+
+# Workers KV binding for project routing table.
+# Create the namespace with: wrangler kv:namespace create "PROJECTS"
+# Then replace the id below with the output ID.
+[[kv_namespaces]]
+binding = "PROJECTS"
+id = "YOUR_KV_NAMESPACE_ID"           # Replace after: wrangler kv:namespace create "PROJECTS"
+preview_id = "YOUR_KV_NAMESPACE_PREVIEW_ID"  # Replace after: wrangler kv:namespace create "PROJECTS" --preview
+
+# Secrets (set via CLI, never commit values):
 #   wrangler secret put PREVIEW_PROTECTION_SECRET
-# and it must match the api-server's PREVIEW_PROTECTION_SECRET env var exactly,
-# so the worker can verify preview-protection session cookies itself.
+#     → must match api-server PREVIEW_PROTECTION_SECRET
+#   wrangler secret put INTERNAL_SECRET
+#     → must match api-server INTERNAL_SECRET (used for telemetry callbacks)

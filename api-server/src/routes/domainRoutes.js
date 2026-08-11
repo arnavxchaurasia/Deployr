@@ -4,6 +4,7 @@ const dns = require('dns').promises;
 const { prisma } = require('../../lib/prisma');
 const { authMiddleware } = require('../middlewares/authMiddleware');
 const { projectAccessWhere } = require('../services/projectAccessService');
+const { createCustomHostname, deleteCustomHostname, getCustomHostnameStatus } = require('../services/cloudflareService');
 
 const router = express.Router();
 
@@ -68,10 +69,20 @@ router.post('/project/:id/domain', authMiddleware, async (req, res) => {
     if (!project) return res.status(404).json({ error: 'Project not found or insufficient permissions' });
 
     const token = crypto.randomBytes(12).toString('hex');
+
+    // Register with Cloudflare for SaaS so CF issues/renews the TLS cert automatically
+    const cfResult = await createCustomHostname(domain);
+
     const updated = await prisma.project.update({
       where: { id: project.id },
-      data: { customDomain: domain, domainVerified: false, domainVerificationToken: token, sslStatus: 'pending' },
-      select: domainSelect,
+      data: {
+        customDomain: domain,
+        domainVerified: false,
+        domainVerificationToken: token,
+        sslStatus: cfResult ? cfResult.sslStatus : 'pending',
+        cfCustomHostnameId: cfResult ? cfResult.id : null,
+      },
+      select: { ...domainSelect, cfCustomHostnameId: true },
     });
     res.json(formatDomain(updated));
   } catch (err) {
@@ -85,13 +96,17 @@ router.delete('/project/:id/domain', authMiddleware, async (req, res) => {
   try {
     const project = await prisma.project.findFirst({
       where: { id: req.params.id, ...projectAccessWhere(req.user.id, 'ADMIN') },
-      select: { id: true },
+      select: { id: true, cfCustomHostnameId: true },
     });
     if (!project) return res.status(404).json({ error: 'Project not found or insufficient permissions' });
 
+    if (project.cfCustomHostnameId) {
+      await deleteCustomHostname(project.cfCustomHostnameId);
+    }
+
     await prisma.project.update({
       where: { id: project.id },
-      data: { customDomain: null, domainVerified: false, domainVerificationToken: null, sslStatus: 'none' },
+      data: { customDomain: null, domainVerified: false, domainVerificationToken: null, sslStatus: 'none', cfCustomHostnameId: null },
     });
     res.json({ success: true });
   } catch (err) {
@@ -121,9 +136,15 @@ router.post('/project/:id/domain/verify', authMiddleware, async (req, res) => {
     }
 
     if (verified) {
+      // Also poll CF for live SSL cert status
+      const proj = await prisma.project.findUnique({ where: { id: project.id }, select: { cfCustomHostnameId: true } });
+      const cfSslStatus = proj?.cfCustomHostnameId
+        ? (await getCustomHostnameStatus(proj.cfCustomHostnameId)) || 'active'
+        : 'active';
+
       await prisma.project.update({
         where: { id: project.id },
-        data: { domainVerified: true, sslStatus: 'active' },
+        data: { domainVerified: true, sslStatus: cfSslStatus },
       });
     }
 

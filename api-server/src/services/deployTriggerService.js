@@ -133,7 +133,7 @@ async function triggerECSBuild({ project, branch, commitHash, trigger, prNumber 
     { name: 'BUILD_COMMAND',       value: project.buildCommand   || 'npm run build' },
     { name: 'OUTPUT_DIR',          value: project.outputDir      || 'dist' },
     { name: 'INSTALL_COMMAND',     value: project.installCommand || 'npm install' },
-    { name: 'ROOT_DIR',            value: project.rootDir        || '.' },
+    { name: 'ROOT_DIR',            value: project.monorepoRoot || project.rootDir || '.' },
   ];
 
   // Custom Docker-based builds dispatch to CodeBuild instead of the ECS

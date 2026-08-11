@@ -15,6 +15,8 @@ const SOCKET_BASE = process.env.SOCKET_BASE || "http://localhost:9002";
 const resolveCache = new Map();
 const RESOLVE_TTL = 30 * 1000;
 
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
 /* ------------------------------------------------
    Helper: Parse Cookie Header manually
 ------------------------------------------------ */

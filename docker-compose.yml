@@ -14,6 +14,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - caddy_data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   frontend:
     build: ./frontend
@@ -26,6 +31,12 @@ services:
       caddy: deployr.dev # Replace with actual domain
       caddy.reverse_proxy: "{{upstreams 3000}}"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   api-server:
     build: ./api-server
@@ -41,6 +52,12 @@ services:
       caddy.handle_path_1: /*
       caddy.handle_path_1.reverse_proxy: "{{upstreams 9000}}"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   s3-proxy:
     build: ./s3-reverse-proxy
@@ -51,6 +68,12 @@ services:
       caddy: "*.deployr.dev" # Replace with actual wildcard domain
       caddy.reverse_proxy: "{{upstreams 8000}}"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
 networks:
   caddy:
